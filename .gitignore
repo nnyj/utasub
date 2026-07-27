@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+utasub.egg-info/
+
+# machine-specific launchers
+utasub.*.bat

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "utasub"
+version = "0.1.0"
+description = "Stamp official lyrics onto performance videos, karaoke-grade srt/ass"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "nnyj"}]
+requires-python = ">=3.12"
+dependencies = [
+  "numpy",
+  # not on PyPI; for development a local editable install overrides these
+  "lyrickit @ git+https://github.com/nnyj/lyrickit",
+  "romakit[jp] @ git+https://github.com/nnyj/romakit",
+]
+
+[project.scripts]
+utasub = "utasub.cli:main"
+utasub-asr = "utasub.core.asr_gen:main"
+
+[project.gui-scripts]
+utasub-gui = "utasub.cli:main"
+
+[project.optional-dependencies]
+gui = ["PySide6"]
+# ASR generation (Transcribe button / utasub-asr). Heavy: torch pulled by qwen-asr.
+asr = ["qwen-asr", "audio-separator", "torchaudio"]
+# CJK romanization beyond Japanese (romakit[jp] covers ja)
+zh = ["pypinyin"]
+ko = ["korean-romanizer"]
+
+[tool.setuptools.packages.find]
+include = ["utasub*"]
