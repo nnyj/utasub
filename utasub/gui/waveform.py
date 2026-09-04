@@ -3,10 +3,7 @@ import math
 from dataclasses import replace
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import (
-  QColor, QPainter, QPen, QFont, QFontMetrics,
-  QWheelEvent, QMouseEvent,
-)
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QWheelEvent, QMouseEvent
 from PySide6.QtWidgets import QWidget
 
 from ..core.align import Cue
@@ -16,8 +13,21 @@ from .timeline_util import (
   romaji_for, find_onsets, UndoStack, fmt_tick, TICK_STEPS,
   DRAG_NONE, DRAG_MOVE, DRAG_LEFT, DRAG_RIGHT, DRAG_PAN, DRAG_REGION,
   EDGE_THRESH_PX, NEIGHBOR_SNAP_PX, REGION_THRESH_PX, MIN_REGION_S,
+  MIN_CUE_LEN_S, MIN_CUE_GAP_S, ONSET_SNAP_S, LABEL_MIN_PX, LABEL_ROMAJI_PX,
 )
 
+def as_cue(c, default_conf=None):
+  """Cue from a Cue or a (start, end, text[, confidence]) tuple."""
+  if isinstance(c, Cue):
+    return c
+  return Cue(c[0], c[1], c[2], c[3] if len(c) > 3 else default_conf)
+
+def _rebased_spans(cue, delta):
+  """Karaoke spans of `cue` re-based onto a start moved `delta` later, so a
+  split half or a merged tail keeps timing its own syllables."""
+  if not cue.token_spans:
+    return None
+  return [(c, a - delta, b - delta) for c, a, b in cue.token_spans]
 
 class WaveformCanvas(QWidget):
   """Custom paint widget: waveform + cue block lane."""
@@ -30,14 +40,14 @@ class WaveformCanvas(QWidget):
   playing_cue_changed = Signal(int)  # cue index under the playhead, -1 when none
   playing_region_changed = Signal(int)  # region index under the playhead, -1 when none
 
-  CUE_LANE_H = 44          # px for cue lane (fits 2 text lines: text + romaji)
-  RULER_H = 18             # px for the time ruler strip
-  BOTTOM_MARGIN = 10       # breathing room under the ruler labels
-  MIN_WAVEFORM_H = 40      # waveform never collapses below this
+  CUE_LANE_H = 48          # px for cue lane (fits 2 text lines: text + romaji)
+  RULER_H = 20             # px for the time ruler strip
+  BOTTOM_MARGIN = 8        # breathing room under the ruler labels
+  MIN_WAVEFORM_H = 60      # waveform never collapses below this
 
   def __init__(self, parent=None):
     super().__init__(parent)
-    self.setMinimumHeight(120)  # MIN_WAVEFORM_H + lane + ruler + margin
+    self.setMinimumHeight(140)  # MIN_WAVEFORM_H + lane + ruler + margin
     self.setMouseTracking(True)
     self.setFocusPolicy(Qt.StrongFocus)
     self.setToolTip(
@@ -51,6 +61,8 @@ class WaveformCanvas(QWidget):
     self._pyramid = {}      # factor -> (mins, maxs, mean_square) arrays
     self._col_cache_key = None
     self._col_cache = None  # (col_min, col_max, col_rms) per pixel
+    self._bg_key = None     # cached static layer: waveform + onsets + ruler
+    self._bg_pix = None
     self.provisional = False
     self.cues = []          # list of Cue
     self.onsets = []        # onset times in seconds
@@ -85,16 +97,16 @@ class WaveformCanvas(QWidget):
     # dirty flag
     self._dirty = False
 
-    self._font = QFont("Segoe UI", 8)
-    self._label_fm = QFontMetrics(self._font)
+    self._font = theme.canvas_font()
 
   # --- waveform source ---
 
-  def set_audio(self, audio, sr=16000):
-    """Store raw mono float32 audio, compute onsets + min/max pyramid."""
+  def set_audio(self, audio, sr=16000, onsets=None):
+    """Store raw mono float32 audio, compute onsets + min/max pyramid.
+    onsets: precomputed by the loader thread when available."""
     import numpy as np
-    self._col_cache_key = None
-    self._col_cache = None
+    self._col_cache_key = self._bg_key = None
+    self._col_cache = self._bg_pix = None
     if audio is None or len(audio) == 0:
       self._audio = None
       self._pyramid = {}
@@ -103,7 +115,7 @@ class WaveformCanvas(QWidget):
     self._audio = np.ascontiguousarray(audio, dtype=np.float32)
     self._sr = sr
     self.duration = len(self._audio) / sr
-    self.onsets = find_onsets(self._audio, sr)
+    self.onsets = find_onsets(self._audio, sr) if onsets is None else onsets
     self._build_pyramid()
 
   def _build_pyramid(self):
@@ -309,13 +321,11 @@ class WaveformCanvas(QWidget):
   # --- snap ---
 
   def snap_to_onset(self, t, suppress=False):
-    """Snap time to nearest onset within 150ms. Alt suppresses."""
+    """Snap time to the nearest onset inside the snap band. Alt suppresses."""
     if suppress or not self.onsets:
       return t
     nearest = min(self.onsets, key=lambda o: abs(o - t))
-    if abs(nearest - t) <= 0.150:
-      return nearest
-    return t
+    return nearest if abs(nearest - t) <= ONSET_SNAP_S else t
 
   def snap_to_neighbor(self, t, bound, suppress=False):
     """Snap t onto a neighbouring cue's edge when within NEIGHBOR_SNAP_PX.
@@ -329,12 +339,46 @@ class WaveformCanvas(QWidget):
   # --- cue editing ---
 
   def _enforce_non_decreasing(self, from_idx=0):
-    """Ensure starts stay non-decreasing from from_idx onward."""
+    """Keep starts non-decreasing from from_idx onward."""
     for j in range(max(1, from_idx), len(self.cues)):
       if self.cues[j].start < self.cues[j - 1].start:
-        diff = self.cues[j - 1].start + 0.05 - self.cues[j].start
+        diff = self.cues[j - 1].start + MIN_CUE_GAP_S - self.cues[j].start
         c = self.cues[j]
         self.cues[j] = replace(c, start=c.start + diff, end=c.end + diff)
+
+  def _follower_snapshot(self, idx):
+    """[(j, start, end), ...] for the cues after idx, taken before an edit that
+    may shove them."""
+    return [(j, self.cues[j].start, self.cues[j].end)
+            for j in range(idx + 1, len(self.cues))]
+
+  def _changed_since(self, snapshot):
+    """[(j, old, new), ...] for cues the edit actually moved, so one undo entry
+    covers the shoved/rippled neighbours as well as the dragged cue."""
+    out = []
+    for j, s, e in snapshot:
+      if j < len(self.cues) and (self.cues[j].start != s or self.cues[j].end != e):
+        out.append((j, replace(self.cues[j], start=s, end=e), replace(self.cues[j])))
+    return out
+
+  def retime_cue(self, idx, start=None, end=None):
+    """Set one cue's bounds (tap sync, nudge), shoving later cues as needed.
+    Pushes a single undo entry covering every cue that moved. Returns bool."""
+    if idx < 0 or idx >= len(self.cues):
+      return False
+    c = self.cues[idx]
+    new_start = c.start if start is None else max(0.0, round(start, 3))
+    new_end = max(c.end if end is None else round(end, 3),
+                  new_start + MIN_CUE_LEN_S)
+    if (new_start, new_end) == (c.start, c.end):
+      return False
+    snap = self._follower_snapshot(idx)
+    self.cues[idx] = replace(c, start=new_start, end=new_end)
+    self._enforce_non_decreasing(idx)
+    self.undo_stack.push(('timing', idx, replace(c), replace(self.cues[idx]),
+                          self._changed_since(snap)))
+    self._mark_dirty()
+    return True
 
   def _mark_dirty(self):
     self._dirty = True
@@ -372,11 +416,12 @@ class WaveformCanvas(QWidget):
     if idx < 0 or idx >= len(self.cues):
       return
     c = self.cues[idx]
-    if split_time <= c.start + 0.05 or split_time >= c.end - 0.05:
+    if split_time <= c.start + MIN_CUE_LEN_S or split_time >= c.end - MIN_CUE_LEN_S:
       return  # too close to edges
     old = replace(c)
     self.cues[idx] = replace(c, end=split_time)
-    new_cue = replace(c, start=split_time)
+    new_cue = replace(c, start=split_time,
+                      token_spans=_rebased_spans(c, split_time - c.start))
     self.cues.insert(idx + 1, new_cue)
     self.undo_stack.push(('split', idx, old, replace(self.cues[idx]),
                           replace(new_cue)))
@@ -389,7 +434,9 @@ class WaveformCanvas(QWidget):
     a = self.cues[idx]
     b = self.cues[idx + 1]
     merged_text = f"{a.text} {b.text}".strip()
-    merged = Cue(a.start, b.end, merged_text, a.confidence)
+    spans = (a.token_spans or []) + (_rebased_spans(b, a.start - b.start) or [])
+    merged = replace(a, end=b.end, text=merged_text,
+                     token_spans=spans or None)
     old_a = replace(a)
     old_b = replace(b)
     self.cues[idx] = merged
@@ -541,11 +588,9 @@ class WaveformCanvas(QWidget):
       c = self.cues[idx]
       self._drag_orig_start = c.start
       self._drag_orig_end = c.end
-      if self._drag_ripple:
-        self._drag_orig_following = [
-          (j, self.cues[j].start, self.cues[j].end)
-          for j in range(idx + 1, len(self.cues))
-        ]
+      # snapshot taken for every drag, not just ripple: a plain drag can still
+      # shove later cues through _enforce_non_decreasing, and undo must cover them
+      self._drag_orig_following = self._follower_snapshot(idx)
       self.selected = idx
       self.selection_changed.emit(idx)
       self._push_undo_snapshot(idx)
@@ -620,7 +665,7 @@ class WaveformCanvas(QWidget):
           self._drag_snap_suppress)
         new_start = snapped_end - orig_dur
       if idx > 0:
-        new_start = max(new_start, self.cues[idx - 1].start + 0.05)
+        new_start = max(new_start, self.cues[idx - 1].start + MIN_CUE_GAP_S)
       self.cues[idx] = replace(c, start=new_start, end=new_start + orig_dur)
       if self._drag_ripple:
         shift = new_start - self._drag_orig_start
@@ -643,8 +688,8 @@ class WaveformCanvas(QWidget):
         if (not self._drag_snap_suppress
             and self._drag_orig_start >= prev_end - 1e-6):
           new_start = max(new_start, prev_end)
-        new_start = max(new_start, self.cues[idx - 1].start + 0.05)
-      new_start = min(new_start, self.cues[idx].end - 0.05)
+        new_start = max(new_start, self.cues[idx - 1].start + MIN_CUE_GAP_S)
+      new_start = min(new_start, self.cues[idx].end - MIN_CUE_LEN_S)
       c = self.cues[idx]
       self.cues[idx] = replace(c, start=new_start)
 
@@ -658,7 +703,7 @@ class WaveformCanvas(QWidget):
         if (not self._drag_snap_suppress
             and self._drag_orig_end <= next_start + 1e-6):
           new_end = min(new_end, next_start)
-      new_end = max(self.cues[idx].start + 0.05, new_end)
+      new_end = max(self.cues[idx].start + MIN_CUE_LEN_S, new_end)
       c = self.cues[idx]
       self.cues[idx] = replace(c, end=new_end)
 
@@ -699,208 +744,139 @@ class WaveformCanvas(QWidget):
     self._undo_snapshot = (idx, replace(c))
 
   def commit_undo(self):
-    """Call after mouse release to finalize undo entry. A ripple drag carries
-    the cues it dragged along, so one undo restores the whole move."""
+    """Call after mouse release to finalize the undo entry. It carries every cue
+    the drag moved (ripple followers and cues shoved by the order guard), so one
+    undo restores the whole move. Bounds are rounded here, not on every frame."""
     if self._undo_snapshot is None:
       return
     idx, old = self._undo_snapshot
     if idx < len(self.cues):
+      c = self.cues[idx]
+      self.cues[idx] = replace(c, start=round(c.start, 3), end=round(c.end, 3))
       new = self.cues[idx]
       if old.start != new.start or old.end != new.end:
-        rippled = [(j, replace(self.cues[j], start=os, end=oe), replace(self.cues[j]))
-                   for j, os, oe in self._drag_orig_following if j < len(self.cues)]
-        self.undo_stack.push(('timing', idx, old, replace(new), rippled))
+        self.undo_stack.push(('timing', idx, old, replace(new),
+                              self._changed_since(self._drag_orig_following)))
     self._undo_snapshot = None
 
-  def do_undo(self):
-    cmd = self.undo_stack.undo()
-    if cmd is None:
-      return
-    kind = cmd[0]
-    if kind == 'timing':
-      idx, old = cmd[1], cmd[2]
-      if idx < len(self.cues):
-        self.cues[idx] = old
-        for j, old_j, _new_j in (cmd[4] if len(cmd) > 4 else []):
-          if j < len(self.cues):
-            self.cues[j] = old_j
-        self._mark_dirty()
-    elif kind == 'insert':
-      _, idx, cue = cmd
-      if idx < len(self.cues):
-        self.cues.pop(idx)
-        if self.selected >= len(self.cues):
-          self.selected = max(-1, len(self.cues) - 1)
-        self._mark_dirty()
-    elif kind == 'remove':
-      _, idx, cue = cmd
-      self.cues.insert(idx, cue)
-      self._mark_dirty()
-    elif kind == 'split':
-      _, idx, old, first_half, second_half = cmd
-      if idx + 1 < len(self.cues):
-        self.cues.pop(idx + 1)
-      if idx < len(self.cues):
-        self.cues[idx] = old
-      self._mark_dirty()
-    elif kind == 'merge':
-      _, idx, old_a, old_b, merged = cmd
-      if idx < len(self.cues):
-        self.cues[idx] = old_a
-        self.cues.insert(idx + 1, old_b)
-      self._mark_dirty()
-    elif kind == 'offset':
-      self._apply_offset(-cmd[1])
-      self._mark_dirty()
+  # undo/redo are mirror images: one table per direction, each entry taking the
+  # command tuple and applying the half of it that direction needs
+  def _u_timing(self, cmd, forward):
+    idx, cue = cmd[1], cmd[3 if forward else 2]
+    if idx < len(self.cues):
+      self.cues[idx] = cue
+    for j, old_j, new_j in (cmd[4] if len(cmd) > 4 else []):
+      if j < len(self.cues):
+        self.cues[j] = new_j if forward else old_j
 
-  def do_redo(self):
-    cmd = self.undo_stack.redo()
-    if cmd is None:
-      return
-    kind = cmd[0]
-    if kind == 'timing':
-      idx, new = cmd[1], cmd[3]
-      if idx < len(self.cues):
-        self.cues[idx] = new
-        for j, _old_j, new_j in (cmd[4] if len(cmd) > 4 else []):
-          if j < len(self.cues):
-            self.cues[j] = new_j
-        self._mark_dirty()
-    elif kind == 'insert':
-      _, idx, cue = cmd
-      self.cues.insert(idx, cue)
-      self._mark_dirty()
-    elif kind == 'remove':
-      _, idx, cue = cmd
-      if idx < len(self.cues):
-        self.cues.pop(idx)
-        if self.selected >= len(self.cues):
-          self.selected = max(-1, len(self.cues) - 1)
-        self._mark_dirty()
-    elif kind == 'split':
-      _, idx, old, first_half, second_half = cmd
+  def _u_add(self, idx, cue):
+    self.cues.insert(idx, cue)
+
+  def _u_pop(self, idx, _cue=None):
+    if idx < len(self.cues):
+      self.cues.pop(idx)
+      if self.selected >= len(self.cues):
+        self.selected = max(-1, len(self.cues) - 1)
+
+  def _u_split(self, cmd, forward):
+    _, idx, old, first_half, second_half = cmd
+    if forward:
       if idx < len(self.cues):
         self.cues[idx] = first_half
         self.cues.insert(idx + 1, second_half)
-      self._mark_dirty()
-    elif kind == 'merge':
-      _, idx, old_a, old_b, merged = cmd
-      if idx < len(self.cues) and idx + 1 < len(self.cues):
+      return
+    if idx + 1 < len(self.cues):
+      self.cues.pop(idx + 1)
+    if idx < len(self.cues):
+      self.cues[idx] = old
+
+  def _u_merge(self, cmd, forward):
+    _, idx, old_a, old_b, merged = cmd
+    if idx >= len(self.cues):
+      return
+    if forward:
+      if idx + 1 < len(self.cues):
         self.cues[idx] = merged
         self.cues.pop(idx + 1)
+      return
+    self.cues[idx] = old_a
+    self.cues.insert(idx + 1, old_b)
+
+  _APPLY = {
+    'timing': lambda s, cmd, fwd: s._u_timing(cmd, fwd),
+    'insert': lambda s, cmd, fwd: (s._u_add if fwd else s._u_pop)(cmd[1], cmd[2]),
+    'remove': lambda s, cmd, fwd: (s._u_pop if fwd else s._u_add)(cmd[1], cmd[2]),
+    'split': lambda s, cmd, fwd: s._u_split(cmd, fwd),
+    'merge': lambda s, cmd, fwd: s._u_merge(cmd, fwd),
+    'offset': lambda s, cmd, fwd: s._apply_offset(cmd[1] if fwd else -cmd[1]),
+  }
+
+  def _apply_cmd(self, cmd, forward):
+    if cmd is None:
+      return
+    fn = self._APPLY.get(cmd[0])
+    if fn is not None:
+      fn(self, cmd, forward)
       self._mark_dirty()
-    elif kind == 'offset':
-      self._apply_offset(cmd[1])
-      self._mark_dirty()
+
+  def do_undo(self):
+    self._apply_cmd(self.undo_stack.undo(), False)
+
+  def do_redo(self):
+    self._apply_cmd(self.undo_stack.redo(), True)
 
   # --- paint ---
 
-  def paintEvent(self, ev):
-    p = QPainter(self)
-    p.setRenderHint(QPainter.Antialiasing, False)
-    w = self.width()
-    h = self.height()
+  def _draw_region_lines(self, p, y0, y1, pen):
+    """Vertical marks at every region boundary between y0 and y1."""
+    p.setPen(pen)
+    for r in self.regions:
+      for t in (r.start, r.end):
+        rx = int(self.time_to_x(t))
+        if 0 <= rx < self.width():
+          p.drawLine(rx, y0, rx, y1)
 
-    # background
-    p.fillRect(0, 0, w, h, theme.BG)
+  def _static_layer(self):
+    """Waveform, onsets, ruler and region marks rendered once per (view, size).
+    Playback ticks and cue drags then repaint the lane over this pixmap instead
+    of running the per-pixel column loop again."""
+    w, h = self.width(), self.height()
+    key = (round(self.view_start, 4), round(self.view_end, 4), w, h,
+           id(self._audio), tuple((r.start, r.end) for r in self.regions))
+    if self._bg_key == key and self._bg_pix is not None:
+      return self._bg_pix
+    dpr = self.devicePixelRatioF()
+    pm = QPixmap(max(int(w * dpr), 1), max(int(h * dpr), 1))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(theme.BG)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, False)
+    p.setFont(self._font)
 
     wf_h = self._waveform_h()
     mid_y = wf_h // 2
-
-    # center line (subtle)
     p.setPen(QPen(theme.CENTER_LINE, 1))
     p.drawLine(0, mid_y, w, mid_y)
 
-    # waveform: raw-audio path (Audacity-style min/max + RMS band) takes precedence
+    # min/max peaks and the RMS band in one pass over the columns
     if self._audio is not None and len(self._audio):
       col_min, col_max, col_rms = self._compute_columns(
         self.view_start, self.view_end, w)
       amp = mid_y * 0.9
-      # outer min/max peaks (dark green)
-      p.setPen(QPen(theme.WAVE_PEAK, 1))
+      peak_pen, rms_pen = QPen(theme.WAVE_PEAK, 1), QPen(theme.WAVE_RMS, 1)
       for px in range(w):
-        y_top = mid_y - int(col_max[px] * amp)
-        y_bot = mid_y - int(col_min[px] * amp)
-        p.drawLine(px, y_top, px, y_bot)
-      # inner RMS band (brighter green)
-      p.setPen(QPen(theme.WAVE_RMS, 1))
-      for px in range(w):
+        p.setPen(peak_pen)
+        p.drawLine(px, mid_y - int(col_max[px] * amp),
+                   px, mid_y - int(col_min[px] * amp))
         r = int(col_rms[px] * amp)
+        p.setPen(rms_pen)
         p.drawLine(px, mid_y - r, px, mid_y + r)
 
-    # onset markers (thin vertical lines in waveform area)
     p.setPen(QPen(theme.ONSET, 1))
     for ot in self.onsets:
       ox = int(self.time_to_x(ot))
       if 0 <= ox < w:
         p.drawLine(ox, 0, ox, wf_h)
-
-    # cue lane background
-    lane_y = self._cue_lane_y()
-    p.fillRect(0, lane_y, w, self.CUE_LANE_H, theme.LANE)
-
-    # empty-state hint (no cues, not provisional)
-    if not self.cues and not self.provisional:
-      p.setFont(self._font)
-      p.setPen(QPen(theme.EMPTY_HINT, 1))
-      p.drawText(0, lane_y, w, self.CUE_LANE_H, Qt.AlignCenter,
-                 "No cues yet — assign lyrics per region, then Align all + Export")
-
-    # cue blocks
-    p.setFont(self._font)
-    for i, c in enumerate(self.cues):
-      x1 = int(self.time_to_x(c.start))
-      x2 = int(self.time_to_x(c.end))
-      bw = max(x2 - x1, 2)
-      if self.provisional:
-        conf = "provisional"
-      else:
-        conf = c.confidence if isinstance(c, Cue) else None
-      fill = CONF_COLORS.get(conf, CONF_COLORS[None])
-      border = CONF_BORDER.get(conf, CONF_BORDER[None])
-
-      if i == self.selected:
-        fill = QColor(fill.red(), fill.green(), fill.blue(), min(fill.alpha() + 60, 255))
-        border = theme.SELECTED_BORDER
-
-      # playback glow: cue currently under the playhead (only during playback)
-      playing = self.playhead > 0 and c.start <= self.playhead <= c.end
-      border_w = 1
-      if playing:
-        p.fillRect(x1, lane_y + 1, bw, self.CUE_LANE_H - 2, theme.PLAYING_FILL)
-        if i != self.selected:
-          border = theme.PLAYING_BORDER
-        border_w = 2
-
-      p.fillRect(x1, lane_y + 1, bw, self.CUE_LANE_H - 2, fill)
-      p.setPen(QPen(border, border_w))
-      p.drawRect(x1, lane_y + 1, bw, self.CUE_LANE_H - 2)
-
-      # label text (+ romaji second line when block tall/wide enough)
-      label = c.text[:40] if hasattr(c, 'text') else ""
-      if bw > 20:
-        max_chars = max(1, bw // 7)
-        p.setPen(QPen(theme.CUE_TEXT, 1))
-        p.drawText(x1 + 3, lane_y + 13, label[:max_chars])
-        if self.CUE_LANE_H >= 30 and bw > 40:
-          rom = romaji_for(c.text) if hasattr(c, 'text') else ""
-          if rom:
-            p.setPen(QPen(theme.CUE_ROMAJI, 1))
-            p.drawText(x1 + 3, lane_y + 27, rom[:max_chars])
-
-    # region vertical markers
-    p.setPen(QPen(theme.REGION_MARKER, 2, Qt.DashLine))
-    for r in self.regions:
-      for t in (r.start, r.end):
-        rx = int(self.time_to_x(t))
-        if 0 <= rx < w:
-          p.drawLine(rx, 0, rx, h)
-
-    # playhead
-    px = int(self.time_to_x(self.playhead))
-    if 0 <= px < w:
-      p.setPen(QPen(theme.PLAYHEAD, 2))
-      p.drawLine(px, 0, px, h)
 
     # time ruler (bottom): also the only strip where region bounds are grabbable
     ruler_y = self._ruler_y()
@@ -920,14 +896,66 @@ class WaveformCanvas(QWidget):
       while t <= self.view_end:
         tx = int(self.time_to_x(t))
         p.drawLine(tx, ruler_y, tx, ruler_y + 6)
-        p.drawText(tx + 2, ruler_y + 15, fmt_tick(t, major))
+        p.drawText(tx + 3, h - 3, fmt_tick(t, major))
         t += major
-      # region boundary handles, drawn in the ruler band only
-      p.setPen(QPen(theme.REGION_MARKER, 3))
-      for r in self.regions:
-        for t in (r.start, r.end):
-          rx = int(self.time_to_x(t))
-          if 0 <= rx < w:
-            p.drawLine(rx, ruler_y, rx, h)
+      self._draw_region_lines(p, ruler_y, h, QPen(theme.REGION_MARKER, 3))
+    self._draw_region_lines(p, 0, wf_h, QPen(theme.REGION_MARKER, 2, Qt.DashLine))
+    p.end()
+    self._bg_key, self._bg_pix = key, pm
+    return pm
 
+  def _draw_cue(self, p, i, c, lane_y):
+    """One cue block: confidence fill, selection/playhead accent, label rows."""
+    x1 = int(self.time_to_x(c.start))
+    bw = max(int(self.time_to_x(c.end)) - x1, 2)
+    conf = "provisional" if self.provisional else getattr(c, "confidence", None)
+    fill = CONF_COLORS.get(conf, CONF_COLORS[None])
+    border, border_w = CONF_BORDER.get(conf, CONF_BORDER[None]), 1
+    if i == self.selected:
+      fill = QColor(fill.red(), fill.green(), fill.blue(),
+                    min(fill.alpha() + 60, 255))
+      border, border_w = theme.SELECTED_BORDER, 2
+    elif self.playhead > 0 and c.start <= self.playhead <= c.end:
+      border, border_w = theme.PLAYING_BORDER, 2  # outline only, no second fill
+    p.fillRect(x1, lane_y + 1, bw, self.CUE_LANE_H - 2, fill)
+    p.setPen(QPen(border, border_w))
+    p.drawRect(x1, lane_y + 1, bw, self.CUE_LANE_H - 2)
+
+    if bw <= LABEL_MIN_PX:
+      return
+    fm = p.fontMetrics()
+    avail = bw - 8
+    rom = romaji_for(c.text) if bw > LABEL_ROMAJI_PX else ""
+    if rom:
+      baseline = lane_y + 4 + fm.ascent()
+    else:
+      baseline = lane_y + (self.CUE_LANE_H // 2 + fm.ascent() // 2)
+    p.setPen(QPen(theme.CUE_TEXT, 1))
+    p.drawText(x1 + 4, baseline,
+               fm.elidedText(c.text, Qt.ElideRight, avail))
+    if rom:
+      p.setPen(QPen(theme.CUE_ROMAJI, 1))
+      p.drawText(x1 + 4, baseline + fm.height(),
+                 fm.elidedText(rom, Qt.ElideRight, avail))
+
+  def paintEvent(self, ev):
+    p = QPainter(self)
+    p.setRenderHint(QPainter.Antialiasing, False)
+    p.drawPixmap(0, 0, self._static_layer())
+    p.setFont(self._font)
+    w, h = self.width(), self.height()
+
+    lane_y = self._cue_lane_y()
+    p.fillRect(0, lane_y, w, self.CUE_LANE_H, theme.LANE)
+    if not self.cues and not self.provisional:
+      p.setPen(QPen(theme.EMPTY_HINT, 1))
+      p.drawText(0, lane_y, w, self.CUE_LANE_H, Qt.AlignCenter,
+                 "No cues yet — assign lyrics per region, then Align all + Export")
+    for i, c in enumerate(self.cues):
+      self._draw_cue(p, i, c, lane_y)
+
+    px = int(self.time_to_x(self.playhead))
+    if 0 <= px < w:
+      p.setPen(QPen(theme.PLAYHEAD, 2))
+      p.drawLine(px, 0, px, h)
     p.end()

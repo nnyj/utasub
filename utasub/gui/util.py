@@ -2,12 +2,10 @@
 from PySide6.QtCore import Qt, QObject, QEvent, QSettings
 from PySide6.QtWidgets import QAbstractScrollArea
 
-
 def settings():
   """User-level GUI prefs (registry on Windows, ini elsewhere). Per-file
   values live in session; this holds defaults for files without one."""
   return QSettings("utasub", "utasub")
-
 
 def _shift_hscroll(view, ev):
   """Shift+wheel → horizontal scroll (Qt has no built-in mapping).
@@ -22,7 +20,6 @@ def _shift_hscroll(view, ev):
   ev.accept()
   return True
 
-
 class _ShiftHScrollFilter(QObject):
   """App-wide shift+wheel → horizontal scroll for every scroll area
   (tables, trees, text edits). Widgets with their own wheel meaning
@@ -36,9 +33,7 @@ class _ShiftHScrollFilter(QObject):
       return True
     return False
 
-
 _filter = None  # module-level ref keeps the filter alive for the app lifetime
-
 
 def install_shift_hscroll(app):
   global _filter

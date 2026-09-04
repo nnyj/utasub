@@ -36,14 +36,12 @@ STRATEGY_HINT = (
   "  low_confidence_asr - weak match, kept ASR\n"
   "  unassigned - no lyrics, kept ASR")
 
-
 class _NoAutofitHeader(QHeaderView):
   """Double-click-to-autofit blows the Title column up and pushes Strategy out
   of the dock, so swallow the event."""
 
   def mouseDoubleClickEvent(self, ev):
     ev.accept()
-
 
 class RegionListMixin:
   """Region dock construction + all region-list behaviour."""
@@ -105,6 +103,13 @@ class RegionListMixin:
       if strategy == "pending":
         item.setForeground(4, QBrush(theme.GRAY))
       item.setToolTip(3, f"{title}{rom}")  # full title, column is capped
+      if self._region_suspect(i):
+        # a weak or near-tied auto-assignment: the lyrics may be the wrong
+        # song's entirely, which no amount of nudging in the timeline fixes
+        item.setForeground(3, QBrush(theme.CONF_LOW))
+        runner = getattr(r, "runner_up", "")
+        item.setToolTip(3, f"{title}{rom}\nweak match, check the picker"
+                        + (f"\nrunner-up: {runner}" if runner else ""))
       self._region_list.addTopLevelItem(item)
     for c in range(self._region_list.columnCount()):
       self._region_list.resizeColumnToContents(c)
@@ -146,6 +151,14 @@ class RegionListMixin:
       return "pending"
     return ""
 
+  def _region_suspect(self, idx):
+    """True when the DP flagged this region's auto-assignment. A hand pick in
+    the picker clears it: the user has already made the call the flag asks for."""
+    chosen = self._region_chosen.get(idx)
+    if chosen is not None and getattr(chosen[1], "user_picked", False):
+      return False
+    return bool(getattr(self._regions[idx], "suspect", False))
+
   def _region_status(self, idx):
     chosen = self._region_chosen.get(idx)
     if chosen is not None:
@@ -175,18 +188,14 @@ class RegionListMixin:
     if row < 0 or not self._regions or row >= len(self._regions):
       self._active_region = None
       self._picker.set_region_label(None)
+      self.set_region_bounds(None)
       self._refresh_region_actions()
       return
     self._store_current_choice()
     self._active_region = row
     self._picker.set_region_label(row)
     region = self._regions[row]
-
-    from ..core.regions import region_segments
-    rsegs = region_segments(self._segments, region)
-    dur_ms = int(region.duration * 1000)
-    self._picker.set_context(rsegs, dur_ms)
-
+    self._refresh_picker_context(region)
     self._fill_query_fields(row, region)
 
     if row in self._region_scored:
@@ -202,11 +211,14 @@ class RegionListMixin:
     self._store_current_choice()
 
     self._timeline.canvas.zoom_to_span(region.start, region.end)
-
-    from .timeline_util import fmt_time_mssff
-    self._region_start_edit.setText(fmt_time_mssff(region.start))
-    self._region_end_edit.setText(fmt_time_mssff(region.end))
+    self.set_region_bounds(region)
     self._refresh_region_actions()
+
+  def _refresh_picker_context(self, region):
+    """Point the picker's scoring at this region's transcript slice."""
+    from ..core.regions import region_segments
+    self._picker.set_context(region_segments(self._segments, region),
+                             int(region.duration * 1000))
 
   def _fill_query_fields(self, row, region):
     """Seed the picker's Title/Album/Artist from this region's metadata: its
@@ -252,19 +264,19 @@ class RegionListMixin:
     elif chosen is del_act:
       self._delete_region(row)
 
-  # menu entries: same ops on the active region (the dock's context menu
-  # targets the clicked row instead)
-
-  def _on_add_region_act(self):
-    if self._media_path:
-      self._add_region(self._timeline.canvas.playhead)
-
-  def _on_split_region_act(self):
-    if self._media_path and self._active_region is not None:
-      self._split_region(self._active_region, self._timeline.canvas.playhead)
-
-  def _on_delete_region_act(self):
-    if self._media_path and self._active_region is not None:
+  def region_op(self, op):
+    """Menu entries: add/split/delete on the active region. The dock's own
+    context menu targets the clicked row instead."""
+    if not self._media_path:
+      return
+    playhead = self._timeline.canvas.playhead
+    if op == "add":
+      self._add_region(playhead)
+    elif self._active_region is None:
+      return
+    elif op == "split":
+      self._split_region(self._active_region, playhead)
+    else:
       self._delete_region(self._active_region)
 
   def _region_index_at(self, t):
@@ -398,15 +410,10 @@ class RegionListMixin:
     self._on_region_bounds_updated(ridx)
 
   def _on_region_bounds_updated(self, idx):
-    from .timeline_util import fmt_time_mssff
     region = self._regions[idx]
     if idx == self._active_region:
-      self._region_start_edit.setText(fmt_time_mssff(region.start))
-      self._region_end_edit.setText(fmt_time_mssff(region.end))
-      from ..core.regions import region_segments
-      rsegs = region_segments(self._segments, region)
-      dur_ms = int(region.duration * 1000)
-      self._picker.set_context(rsegs, dur_ms)
+      self.set_region_bounds(region)
+      self._refresh_picker_context(region)
     self._populate_region_list()
     self._timeline.canvas.regions = list(self._regions)
     self._timeline.canvas.update()

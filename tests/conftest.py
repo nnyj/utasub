@@ -8,7 +8,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
-
 @pytest.fixture(scope="session", autouse=True)
 def _qapp():
   """Single offscreen QApplication for the whole session (Qt needs one before

@@ -1,11 +1,8 @@
 """Lyric picker panel: combo fields with prefill alternates, auto-search,
 ranked candidate table with similarity %, preview pane, paste-row.
 Embedded per-region in MainWindow; region master-detail lives there."""
-import re
-from pathlib import Path
-
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QBrush, QTextCharFormat, QTextCursor
+from PySide6.QtGui import QBrush, QKeySequence, QShortcut, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
   QHBoxLayout, QVBoxLayout, QFormLayout,
   QComboBox, QPushButton, QLabel,
@@ -17,57 +14,8 @@ from PySide6.QtWidgets import (
 from ..core.align import SIMILARITY_THRESHOLD
 from . import theme
 from .theme import GRAY
-
-# --- alternate sources for combo prefill ---
-
-def _parse_filename(path):
-  """Extract Artist, Title from 'Artist - Title' filename patterns."""
-  stem = Path(path).stem
-  # strip youtube id suffix [xxxx], date tags [20xxxxxx], parentheticals
-  stem = re.sub(r"\s*\[[\w-]+\]\s*$", "", stem)
-  stem = re.sub(r"\s*\[\d{8}\]\s*$", "", stem)
-  # fullwidth/unicode quotes → strip
-  stem = re.sub(r'["""＂「」『』【】]', "", stem)
-  stem = re.sub(r"\bfrom\b.*", "", stem, flags=re.IGNORECASE).strip()
-  if " - " in stem:
-    parts = stem.split(" - ", 1)
-    return {"artist": parts[0].strip(), "title": parts[1].strip()}
-  return {"title": stem.strip()}
-
-
-def build_alternates(media_path, tags=None):
-  """Build dict of field → list of (value, source_hint) alternates.
-  First entry in each list = prefilled default. Artist comes from container tags,
-  then 'Artist - Title' filename; parent folder is unreliable, so never used."""
-  alts = {"title": [], "album": [], "artist": []}
-  seen = {k: set() for k in alts}
-
-  def add(field, val, src):
-    v = val.strip()
-    if not v or v in seen[field]:
-      return
-    seen[field].add(v)
-    alts[field].append((v, src))
-
-  # container tags first (primary prefill), cleaned song name before raw tag
-  if tags:
-    from ..core.providers import clean_title
-    raw_title = tags.get("title", "")
-    add("title", clean_title(raw_title), "tags")
-    add("title", raw_title, "tags raw")
-    add("album", tags.get("album", ""), "tags")
-    for a in tags.get("artist", "").split("/"):
-      add("artist", a, "tags")
-
-  fp = _parse_filename(media_path)
-  add("title", fp.get("title", ""), "filename")
-  add("artist", fp.get("artist", ""), "filename")
-
-  for k in alts:
-    if not alts[k]:
-      alts[k].append(("", ""))
-  return alts
-
+# build_alternates lives in core.providers: core.multi_song needs it headless
+from ..core.providers import build_alternates  # noqa: F401
 
 # --- search worker thread ---
 
@@ -78,8 +26,9 @@ class SearchWorker(QThread):
   status = Signal(str)
 
   def __init__(self, query, segments, media_duration_ms,
-               providers=None, fresh=False):
+               providers=None, fresh=False, region_idx=None):
     super().__init__()
+    self.region_idx = region_idx  # region the search was started for
     self.query = query
     self.segments = segments
     self.media_duration_ms = media_duration_ms
@@ -99,7 +48,6 @@ class SearchWorker(QThread):
     except Exception as e:
       self.error.emit(str(e))
 
-
 class _PasteEdit(QTextEdit):
   """Preview/paste pane: pastes land as plain text, so no strikethrough or
   colors are inherited from the source."""
@@ -112,15 +60,16 @@ class _PasteEdit(QTextEdit):
     self.setCurrentCharFormat(QTextCharFormat())  # drop any leftover strike/color
     self.insertPlainText(source.text())
 
-
 # --- picker panel (reusable widget) ---
 
 class PickerPanel(QWidget):
   """Search fields, candidate table, LRC preview, credit toggles, paste-row.
   Embeddable in the MainWindow picker tab."""
 
-  results_ready = Signal(list)   # [(score, Candidate), ...] after search
+  results_ready = Signal(list, object)  # [(score, Candidate), ...], region idx
   apply_requested = Signal()     # "Apply to region" pressed
+
+  EMPTY_HINT = "No candidates. Check the title and press Search."
 
   def __init__(self, parent=None, *,
                media_path=None, tags=None, segments=None,
@@ -136,7 +85,9 @@ class PickerPanel(QWidget):
     self._chosen_index = None  # index into _scored, or -1 for paste
     self._paste_text = ""
     self._verdict_cache = {}  # row_index -> (lines, verdicts)
+    self._translations = {}   # original line -> translation, for the previewed row
     self._stale_workers = []  # superseded SearchWorkers still running
+    self._region_idx = None   # region a search/apply targets
 
     alts = build_alternates(media_path or "", tags)
 
@@ -157,7 +108,9 @@ class PickerPanel(QWidget):
     self.search_btn = QPushButton("Search")
     self.search_btn.setToolTip("Search providers (Enter in any field)")
     self.search_btn.clicked.connect(self.search)
-    self.status_label = QLabel("")
+    self.status_label = QLabel(self.EMPTY_HINT)
+    self.status_label.setWordWrap(True)
+    self.status_label.setStyleSheet(f"color: {theme.HINT_GRAY};")
     btn_col.addWidget(self.search_btn)
     btn_col.addWidget(self.status_label)
     btn_col.addStretch()
@@ -201,6 +154,9 @@ class PickerPanel(QWidget):
       "Assign the selected lyrics to the active region and replace the timeline cues")
     self.apply_btn.setEnabled(False)
     self.apply_btn.clicked.connect(self._on_apply)
+    QShortcut(QKeySequence("Ctrl+Return"), self,
+              activated=self._on_apply,
+              context=Qt.WidgetWithChildrenShortcut)
 
     right_panel = QWidget()
     right_layout = QVBoxLayout(right_panel)
@@ -233,23 +189,35 @@ class PickerPanel(QWidget):
     self.segments = segments
     self.media_duration_ms = media_duration_ms
 
+  def prefill(self, media_path, tags=None):
+    """Reseed Title/Album/Artist from container tags + filename alternates."""
+    alts = build_alternates(str(media_path), tags)
+    for combo, key in ((self.title_combo, "title"), (self.album_combo, "album"),
+                       (self.artist_combo, "artist")):
+      combo.clear()
+      self._seed_combo(combo, alts[key])
+
   # --- combo helper ---
 
   @staticmethod
-  def _make_combo(alternates):
+  def _seed_combo(combo, alternates):
+    """Fill an editable combo from [(value, source_hint), ...]."""
+    for val, hint in alternates:
+      combo.addItem(f"{val}  ({hint})" if hint else val, val)
+    if alternates:
+      combo.setCurrentIndex(0)
+      combo.lineEdit().setText(alternates[0][0])
+
+  @classmethod
+  def _make_combo(cls, alternates):
     """Editable combo from [(value, source_hint), ...]."""
     combo = QComboBox()
     combo.setEditable(True)
-    for val, hint in alternates:
-      label = f"{val}  ({hint})" if hint else val
-      combo.addItem(label, val)
     # picking an item shows the hint-decorated label; swap in the raw value so
     # the field reads clean (the query already strips the hint)
     combo.activated.connect(
       lambda idx, c=combo: c.lineEdit().setText(c.itemData(idx) or c.itemText(idx)))
-    if alternates:
-      combo.setCurrentIndex(0)
-      combo.lineEdit().setText(alternates[0][0])
+    cls._seed_combo(combo, alternates)
     combo.setMinimumWidth(140)
     return combo
 
@@ -295,7 +263,7 @@ class PickerPanel(QWidget):
     self.status_label.setText("Searching...")
     self._worker = SearchWorker(
       query, self.segments, self.media_duration_ms,
-      self.providers, self.fresh)
+      self.providers, self.fresh, region_idx=self._region_idx)
     self._worker.finished.connect(self._on_results)
     self._worker.error.connect(self._on_error)
     self._worker.status.connect(self._on_status)
@@ -304,12 +272,14 @@ class PickerPanel(QWidget):
   def _on_results(self, scored):
     if self.sender() is not self._worker:
       return  # parked worker from a superseded search
+    region_idx = self._worker.region_idx
     self.search_btn.setEnabled(True)
     self.populate(scored)
-    n = len(scored)
-    above = sum(1 for s, _ in scored if s >= SIMILARITY_THRESHOLD)
-    self.status_label.setText(f"{n} results ({above} above threshold)")
-    self.results_ready.emit(scored)
+    if scored:
+      above = sum(1 for s, _ in scored if s >= SIMILARITY_THRESHOLD)
+      self.status_label.setText(f"{len(scored)} results ({above} above threshold)")
+    # the region may have changed while the fetch ran; the host drops mismatches
+    self.results_ready.emit(scored, region_idx)
 
   def _on_status(self, msg):
     if self.sender() is self._worker:
@@ -358,6 +328,8 @@ class PickerPanel(QWidget):
 
     if scored:
       self.table.selectRow(0)
+    else:
+      self.status_label.setText(self.EMPTY_HINT)
     self._refresh_apply_btn()
 
   # --- selection / preview ---
@@ -387,7 +359,8 @@ class PickerPanel(QWidget):
     elif 0 <= row < len(self._scored):
       self._chosen_index = row
       self.preview.setReadOnly(True)
-      self._show_with_credits(self._scored[row][1].lrc, row_index=row)
+      self._show_with_credits(self._scored[row][1].lrc, row_index=row,
+                              candidate=self._scored[row][1])
     else:
       self._chosen_index = None
       self.preview.setPlainText("")
@@ -399,8 +372,9 @@ class PickerPanel(QWidget):
 
   def set_region_label(self, region_idx):
     """Name the target region on the apply button; None = no active region."""
+    self._region_idx = region_idx
     suffix = "" if region_idx is None else f" {region_idx + 1}"
-    self.apply_btn.setText(f"Apply to region{suffix}")
+    self.apply_btn.setText(f"Apply to region{suffix}  (Ctrl+Enter)")
 
   def is_paste_row(self):
     return self._chosen_index == -1
@@ -411,6 +385,8 @@ class PickerPanel(QWidget):
 
   def _on_apply(self):
     """Assign the selected row to the active region (host does the work)."""
+    if not self.apply_btn.isEnabled():
+      return
     if self.is_paste_row():
       self._paste_text = self.preview.toPlainText()
     self.apply_requested.emit()
@@ -429,6 +405,8 @@ class PickerPanel(QWidget):
     strike_fmt.setForeground(QBrush(theme.CREDIT_STRIKE))
     romaji_fmt = QTextCharFormat()
     romaji_fmt.setForeground(QBrush(theme.ROMAJI_CYAN))  # cyan for romaji
+    trans_fmt = QTextCharFormat()
+    trans_fmt.setForeground(QBrush(theme.DIM))  # grey for the translation
     for i, ((t, text), v) in enumerate(zip(self._credit_lines, self._credit_verdicts)):
       if i > 0:
         cursor.insertText("\n")
@@ -441,28 +419,32 @@ class PickerPanel(QWidget):
         if rom and rom != text:
           cursor.insertText("\n")
           cursor.insertText(prefix + rom, romaji_fmt)
+      tr = self._translations.get(text) if v != "credit" else None
+      if tr:
+        cursor.insertText("\n")
+        cursor.insertText(prefix + tr, trans_fmt)
     self.preview.setTextCursor(cursor)
     self.preview.moveCursor(QTextCursor.Start)
 
-  def _show_with_credits(self, lrc_text, row_index=None):
+  def _show_with_credits(self, lrc_text, row_index=None, candidate=None):
     """Show LRC in preview with strikethrough on credit lines, populate toggle list.
-    row_index: cache key for classify verdicts (avoids re-running on selection change)."""
+    row_index: cache key for classify verdicts (avoids re-running on selection change).
+    candidate: source of the greyed translation lines, when it carries a tlyric."""
     from lyrickit import classify_lines
-    from ..core.providers import parse_lrc
+    from ..core.providers import parse_lrc, translation_lines
 
+    self._translations = translation_lines(candidate) if candidate else {}
     lines = parse_lrc(lrc_text)
     if not lines:
       self.preview.setPlainText(lrc_text)
       self._hide_credit_panel()
       return
 
-    if row_index is not None and row_index in self._verdict_cache:
-      cached_lines, verdicts = self._verdict_cache[row_index]
-      if len(cached_lines) == len(lines):
-        lines = cached_lines
-      else:
-        verdicts = classify_lines(lines)
-        self._verdict_cache[row_index] = (lines, verdicts)
+    # cached verdicts survive row switches; a length change means a different
+    # parse, so re-classify
+    cached = self._verdict_cache.get(row_index)
+    if cached and len(cached[0]) == len(lines):
+      lines, verdicts = cached
     else:
       verdicts = classify_lines(lines)
       if row_index is not None:

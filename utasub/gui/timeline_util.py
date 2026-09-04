@@ -3,19 +3,18 @@ romanization cache, onset detection, time format/parse, undo stack, constants.""
 import re
 from functools import lru_cache
 
-
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=4096)
 def romaji_for(text):
   """Cached romanization for cue text (shared by canvas + grid). Empty if no JP."""
   from ..core.romanize import is_cjk, romanize
   return romanize(text) if is_cjk(text) else ""
 
-
 # --- onset detection ---
 
-def find_onsets(audio, sr=16000, gate=0.08):
+def find_onsets(audio, sr=16000, gate=None):
   """High-gate onset times from RMS envelope. Returns sorted list of seconds."""
   import numpy as np
+  gate = ONSET_GATE if gate is None else gate
   if audio is None or len(audio) < sr:
     return []
   frame = int(sr * 0.05)
@@ -33,7 +32,6 @@ def find_onsets(audio, sr=16000, gate=0.08):
       onsets.append(i * 0.05)
     prev_voiced = voiced
   return onsets
-
 
 # --- undo/redo command stack ---
 
@@ -71,7 +69,6 @@ class UndoStack:
     self._stack.clear()
     self._pos = -1
 
-
 # --- drag modes ---
 
 DRAG_NONE = 0
@@ -86,7 +83,19 @@ NEIGHBOR_SNAP_PX = 8  # pixels from a neighbour cue's edge to snap a resize onto
 REGION_THRESH_PX = 8  # pixels from region marker to trigger drag
 MIN_REGION_S = 5.0  # minimum region length in seconds
 CANVAS_H = 200      # default waveform block height; splitter drag overrides
-
+WAVE_SPLIT = 0.45   # share of the timeline tab height given to waveform + lane
+MIN_CUE_LEN_S = 0.05    # a cue never shrinks below this
+MIN_CUE_GAP_S = 0.05    # gap forced between starts when a drag shoves later cues
+ONSET_SNAP_S = 0.150    # snap band around an onset
+ONSET_GATE = 0.08       # onset threshold, fraction of peak RMS
+EDIT_EPS_S = 0.005      # timing delta below which a cue still counts as unedited
+TEXT_NEAR_S = 2.0       # a new text this close to a vanished baseline line retyped it
+NUDGE_S = 0.010         # arrow-key nudge step
+NUDGE_COARSE_S = 0.100  # Ctrl+arrow nudge step
+LEAD_IN_S = 1.0         # pre-roll when playing from the selected cue
+AUTO_ZOOM_PX = 120      # narrower than this on select and the view zooms in
+LABEL_MIN_PX = 20       # cue block narrower than this gets no label
+LABEL_ROMAJI_PX = 80    # ...and needs this much for a second (romaji) row
 
 # --- time formatting ---
 
@@ -95,9 +104,7 @@ def fmt_time_mssff(seconds):
   m, s = divmod(abs(seconds), 60)
   return f"{int(m)}:{s:05.2f}"
 
-
 TICK_STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600]
-
 
 def fmt_tick(seconds, step):
   """Ruler label: sub-second precision only if step needs it; hours shown
@@ -109,7 +116,6 @@ def fmt_tick(seconds, step):
   else:
     body = f"{int(m):02d}:{int(s):02d}" if h else f"{int(m)}:{int(s):02d}"
   return f"{int(h)}:{body}" if h else body
-
 
 def parse_time(text):
   """Parse M:SS.ff or plain seconds. Returns float or None."""

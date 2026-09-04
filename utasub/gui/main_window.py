@@ -1,17 +1,20 @@
 """MainWindow: unified region-list + picker/timeline tabs + log dock.
 Supports empty-state launch with Open... (Ctrl+O) to pick a file."""
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess, QThread, QUrl
+from PySide6.QtCore import Qt, QProcess, QUrl
 from PySide6.QtWidgets import (
   QMainWindow, QTabWidget, QWidget, QVBoxLayout, QLabel,
   QApplication, QMessageBox, QFileDialog, QInputDialog,
 )
 
+from ..core import session
 from . import theme
 from .actions import build_actions
-from .picker import PickerPanel, build_alternates
+from .picker import PickerPanel
 from .playback import PlaybackMixin
 from .region_list import RegionListMixin
 from .timeline import TimelinePanel
@@ -23,7 +26,6 @@ from .workers import (
 )
 
 MEDIA_FILTER = "Media files (*.mkv *.mp4 *.webm *.m4a *.mp3 *.wav *.flac *.ogg *.opus *.avi);;All files (*)"
-
 
 class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
   """Unified GUI: region list (left), Picker/Timeline tabs (center), log (bottom).
@@ -52,14 +54,14 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._region_scored = {}
     self._region_chosen = {}
     self._region_metas = []
-    self._manual_edits = {"timings": [], "deleted": []}
+    self._manual_edits = session.empty_edits()
     self._active_region = None
     self._exported = False
+    self._ass_style = {}   # .ass style knobs the session was written with
 
     # workers
     self._worker_thread = None
-    self._worker = None
-    self._prepare_worker = None  # _PrepareWorker (QThread subclass)
+    self._prepare_worker = None  # _PrepareWorker
     self._embed_worker = None
     # ASR runs out-of-process (QProcess): a torch/CUDA/native crash kills only the
     # child, never this GUI. Its output is streamed to the log; a tail is kept for
@@ -70,7 +72,6 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
 
     # playback
     self._player = None
-    self._play_timer = None
     self._playback_ok = False
 
     self.setWindowTitle("utasub")
@@ -93,7 +94,8 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
 
     self._hint_label = QLabel("Open a media file (Ctrl+O) to begin")
     self._hint_label.setAlignment(Qt.AlignCenter)
-    self._hint_label.setStyleSheet("color: #888; font-size: 14px; padding: 40px;")
+    self._hint_label.setStyleSheet(
+      f"color: {theme.HINT_GRAY}; padding: 40px;")
     picker_layout.addWidget(self._hint_label)
 
     self._picker = PickerPanel(self, providers=self._providers, fresh=self._fresh)
@@ -159,15 +161,23 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     d = str(Path(path) if Path(path).is_dir() else Path(path).parent)
     settings().setValue("paths/last_dir", d)
 
+  def _confirm_discard(self, question):
+    """Offer to save unsaved timeline edits. False = caller must abort."""
+    if not (self._media_path and self._timeline.canvas.dirty):
+      return True
+    reply = QMessageBox.question(
+      self, "Unsaved changes", f"The timeline has unsaved edits. {question}",
+      QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+      QMessageBox.Save)
+    if reply == QMessageBox.Save:
+      self._on_save()
+      return not self._timeline.canvas.dirty
+    return reply == QMessageBox.Discard
+
   def _on_open(self):
     """Open... dialog, then background prepare."""
-    if self._media_path and self._timeline.canvas.dirty:
-      reply = QMessageBox.question(
-        self, "Unsaved changes",
-        "Timeline has unsaved edits. Discard and open new file?",
-        QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-      if reply != QMessageBox.Yes:
-        return
+    if not self._confirm_discard("Open another file?"):
+      return
 
     path, _ = QFileDialog.getOpenFileName(self, "Open media file", self._last_dir(), MEDIA_FILTER)
     if not path:
@@ -218,13 +228,13 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     print(f"\n=== Opening {Path(path).name}...")
     self._prepare_worker = _PrepareWorker(
       path, self._providers, self._fresh, use_setlist=True)
-    self._prepare_worker.finished_data.connect(self._on_prepare_done)
+    self._prepare_worker.done.connect(self._on_prepare_done)
     self._prepare_worker.error.connect(self._on_prepare_error)
     self._hint_label.setText(f"Loading {Path(path).name}...")
     self._prepare_worker.start()
 
   def _cleanup_prepare_thread(self):
-    """Ensure prepare thread is fully stopped before touching shared state."""
+    """Stop the prepare thread fully before touching shared state."""
     if self._prepare_worker is not None and self._prepare_worker.isRunning():
       self._prepare_worker.wait(10000)
     self._prepare_worker = None
@@ -330,32 +340,42 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
 
   # --- embed SRT ---
 
-  def _find_exported_srt(self):
-    """Exported subtitle on disk, .ja.srt preferred over .srt. None if absent."""
+  def _find_exported_subs(self):
+    """Exported sidecars on disk, styled .ass first then one SRT (.ja.srt
+    preferred). Empty list when nothing has been exported yet."""
     if not self._media_path:
-      return None
+      return []
     p = Path(self._media_path)
+    out = [c for c in (p.with_suffix(".ass"),) if c.exists()]
     for suffix in (".ja.srt", ".srt"):
       cand = p.with_suffix(suffix)
       if cand.exists():
-        return cand
-    return None
+        out.append(cand)
+        break
+    return out
+
+  def _find_exported_ass(self):
+    """The styled .ass out of the exported set, else None."""
+    subs = self._find_exported_subs()
+    return subs[0] if subs and subs[0].suffix.lower() == ".ass" else None
 
   def _refresh_embed_action(self):
-    self._embed_act.setEnabled(self._find_exported_srt() is not None)
+    self._embed_act.setEnabled(bool(self._find_exported_subs()))
+    if hasattr(self, "_preview_act"):
+      self._preview_act.setEnabled(self._find_exported_ass() is not None)
 
   def _on_embed(self):
     if not self._media_path:
       return
     if self._embed_worker is not None and self._embed_worker.isRunning():
       return
-    srt = self._find_exported_srt()
-    if srt is None:
-      QMessageBox.information(self, "Embed SRT", "Export an SRT first.")
+    subs = self._find_exported_subs()
+    if not subs:
+      QMessageBox.information(self, "Embed subtitles", "Export an SRT or ASS first.")
       return
-    print(f"\n=== Embedding {srt.name} into video...")
+    print(f"\n=== Embedding {', '.join(p.name for p in subs)} into video...")
     self._embed_act.setEnabled(False)
-    self._embed_worker = _EmbedWorker(self._media_path, str(srt))
+    self._embed_worker = _EmbedWorker(self._media_path, [str(p) for p in subs])
     self._embed_worker.done.connect(self._on_embed_done)
     self._embed_worker.error.connect(self._on_embed_error)
     self._embed_worker.start()
@@ -364,13 +384,30 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._embed_worker = None
     self._refresh_embed_action()
     print(f"  -> {Path(out_path).name}")
-    QMessageBox.information(self, "Embed SRT", f"Wrote {Path(out_path).name}")
+    QMessageBox.information(self, "Embed subtitles", f"Wrote {Path(out_path).name}")
 
   def _on_embed_error(self, msg):
     self._embed_worker = None
     self._refresh_embed_action()
     print(f"  embed error: {msg}")
-    QMessageBox.warning(self, "Embed SRT", f"ffmpeg failed:\n{msg}")
+    QMessageBox.warning(self, "Embed subtitles", f"ffmpeg failed:\n{msg}")
+
+  def _on_preview_mpv(self):
+    """Playback > Preview in mpv: the styled .ass over the real video, from a
+    couple of seconds before the playhead. The Qt player cannot render ASS, so
+    karaoke and styling are only checkable outside the GUI."""
+    ass = self._find_exported_ass()
+    if ass is None:
+      QMessageBox.information(self, "Preview in mpv", "Export an ASS first.")
+      return
+    mpv = shutil.which("mpv")
+    if mpv is None:
+      QMessageBox.warning(self, "Preview in mpv", "mpv is not on PATH.")
+      return
+    at = max(0.0, self._timeline.canvas.playhead - 2.0)
+    print(f"  mpv preview at {at:.1f}s with {ass.name}")
+    subprocess.Popen([mpv, f"--sub-file={ass}", f"--start={at:.2f}",
+                      str(self._media_path)])
 
   # --- cleanup stray files ---
 
@@ -431,8 +468,6 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
       self._player.setSource(QUrl())
       self._player = None
       self._playback_ok = False
-    if self._play_timer is not None:
-      self._play_timer.stop()
 
     # reset per-file state
     self._media_path = str(media_path)
@@ -444,7 +479,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._region_scored = {}
     self._region_chosen = {}
     self._region_metas = []
-    self._manual_edits = {"timings": [], "deleted": []}
+    self._manual_edits = session.empty_edits()
     self._active_region = None
     self._exported = False
 
@@ -459,6 +494,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
       if metas and len(metas) == len(self._regions):
         self._region_metas = metas
       self._manual_edits = sess.get("manual_edits") or self._manual_edits
+      self._ass_style = sess.get("ass_style") or {}
 
     if region_scored:
       for i, scored_list in enumerate(region_scored):
@@ -478,7 +514,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._picker.media_path = str(media_path)
     self._picker.segments = segments
     self._picker.media_duration_ms = media_dur_ms
-    self._prefill_picker_combos(media_path, tags)
+    self._picker.prefill(media_path, tags)
 
     self._region_list.clear()
     self._populate_region_list()
@@ -502,6 +538,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._refresh_region_actions()
     self._export_act.setEnabled(False)
     self._export_ass_act.setEnabled(False)
+    self._export_lrc_act.setEnabled(False)
     self._refresh_embed_action()
 
     self._setup_playback()
@@ -511,20 +548,6 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
 
     # provisional LRC cues from any setlist auto-assignments
     self._rebuild_provisional_cues()
-
-  def _prefill_picker_combos(self, media_path, tags=None):
-    """Fill Title/Album/Artist combos from container tags + filename alternates."""
-    alts = build_alternates(str(media_path), tags)
-    for combo, key in [(self._picker.title_combo, "title"),
-                       (self._picker.album_combo, "album"),
-                       (self._picker.artist_combo, "artist")]:
-      combo.clear()
-      for val, hint in alts[key]:
-        label = f"{val}  ({hint})" if hint else val
-        combo.addItem(label, val)
-      if alts[key]:
-        combo.setCurrentIndex(0)
-        combo.lineEdit().setText(alts[key][0][0])
 
   def _restore_region_choices(self, sess):
     """Saved per-region picks, dropped when they point past the region list."""
@@ -537,8 +560,10 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
   # --- direct session open (--timeline flag) ---
 
   def load_session(self, media_path):
-    """Open an existing session straight into the timeline tab for review/edit.
-    No ASR needed: cues + regions come from the saved session. Returns bool."""
+    """Open an existing session straight into the timeline tab for editing.
+    Cues + regions come from the saved JSON and paint at once; the waveform,
+    transcript and container tags follow from _PrepareWorker, so an ffmpeg
+    decode never freezes the window. Returns bool."""
     from ..core import session as sess_mod
     from ..core.regions import Region
     sess = sess_mod.load(media_path)
@@ -546,15 +571,6 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
       print(f"  timeline: no session for {Path(media_path).name}")
       self._hint_label.setText(f"No session for {Path(media_path).name}")
       return False
-
-    # audio for waveform (best-effort; timeline still works without it)
-    audio = None
-    try:
-      from ..core.align import load_audio_16k, find_vocals
-      audio_path = find_vocals(media_path) or media_path
-      audio = load_audio_16k(str(audio_path))
-    except Exception as e:
-      print(f"  timeline: audio load failed ({e}), no waveform")
 
     self._media_path = str(media_path)
     # pin locale once from all saved cues: timeline romanizes per line
@@ -568,11 +584,9 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._regions = [Region.from_dict(r) for r in sess.get("regions", [])]
     self._region_metas = sess.get("region_metas", [])
     self._manual_edits = sess.get("manual_edits") or self._manual_edits
-    self._audio = audio
-    # ASR block feeds re-align (anchor-warp + coarse need segments, not just cues)
-    from ..core.asr import load_asr
-    asr = load_asr(media_path)
-    self._segments = asr[0] if asr else []
+    self._ass_style = sess.get("ass_style") or {}
+    self._audio = None
+    self._segments = []  # ASR block arrives with the audio, it feeds re-align
     self._region_scored = {}
     self._region_chosen = self._restore_region_choices(sess)
     self._active_region = None
@@ -582,18 +596,9 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._hint_label.setVisible(False)
     self._picker.setVisible(True)
     self._picker.media_path = str(media_path)
-    self._picker.segments = self._segments
-    try:
-      from ..core.providers import media_tags
-      tags = media_tags(media_path)
-    except Exception:
-      tags = None
-    self._prefill_picker_combos(media_path, tags)
 
     self._timeline._media_path = str(media_path)
     self._timeline._session = sess
-    if audio is not None:
-      self._timeline.canvas.set_audio(audio)
     self._timeline.load_cues(sess.get("cues", []), regions=list(self._regions))
 
     self._region_list.clear()
@@ -602,8 +607,31 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._tabs.setCurrentWidget(self._timeline)
     self._export_act.setEnabled(True)
     self._export_ass_act.setEnabled(True)
+    self._export_lrc_act.setEnabled(True)
     self._refresh_embed_action()
+
+    self._cleanup_prepare_thread()
+    self._prepare_worker = _PrepareWorker(media_path, session_only=True)
+    self._prepare_worker.done.connect(self._on_session_media)
+    self._prepare_worker.error.connect(self._on_prepare_error)
+    self._prepare_worker.start()
     return True
+
+  def _on_session_media(self, media):
+    """Waveform + transcript + tags arrived for a session opened in the timeline."""
+    self._cleanup_prepare_thread()
+    if not media:
+      return
+    self._segments = media["segments"]
+    self._picker.segments = self._segments
+    self._picker.media_duration_ms = media["media_dur_ms"]
+    self._picker.prefill(self._media_path, media["tags"])
+    self._audio = media["audio"]
+    if self._audio is not None:
+      self._timeline.canvas.set_audio(self._audio, onsets=media["onsets"])
+      self._timeline.canvas.fit_all()
+    else:
+      print("  timeline: no audio decoded, no waveform")
 
   # --- picker glue ---
 
@@ -616,12 +644,15 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._rebuild_provisional_cues()
     self._refresh_region_actions()
 
-  def _on_picker_results(self, scored):
-    if self._active_region is not None:
-      self._region_scored[self._active_region] = scored
-      self._store_current_choice()  # auto-selected top candidate
-      self._populate_region_list()
-      self._rebuild_provisional_cues()
+  def _on_picker_results(self, scored, region_idx):
+    """Results land under the region the search started for; a region switch
+    mid-fetch makes them stale, so they are dropped rather than misassigned."""
+    if region_idx is None or region_idx != self._active_region:
+      return
+    self._region_scored[region_idx] = scored
+    self._store_current_choice()  # auto-selected top candidate
+    self._populate_region_list()
+    self._rebuild_provisional_cues()
 
   def _mark_user_picked(self, region_idx):
     """Flag the region's chosen candidate as a human pick, so alignment trusts it
@@ -726,6 +757,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
       "offset": self._offset_spin.value(),
       "lead": self._lead_spin.value(),
       "region_choices": dict(self._region_chosen),
+      "ass_style": self._ass_style,
       "placement": {"multi_song": True, "regions": self._region_metas},
       "manual_edits": self._manual_edits,
     }
@@ -749,7 +781,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     if not self._timeline.reset_manual_edits():
       print("  reset edits: no session loaded")
       return
-    self._manual_edits = {"timings": [], "deleted": []}
+    self._manual_edits = session.empty_edits()
     print("  reset edits: cleared (re-run Align, then Save)")
 
   def _pull_manual_edits(self):
@@ -784,26 +816,24 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._tabs.setCurrentWidget(self._timeline)
     self._export_act.setEnabled(True)
     self._export_ass_act.setEnabled(True)
+    self._export_lrc_act.setEnabled(True)
+
+  def _set_align_busy(self, busy):
+    """Grey the three align entry points while one of them owns the worker."""
+    for act in (self._align_all_act, self._align_region_act, self._lrc_as_is_act):
+      act.setEnabled(not busy)
 
   def _start_worker(self, worker, done_slot):
-    """Run an align worker on its own QThread. The refs are nulled only after the
-    thread's event loop exits: dropping them in the result slot lets GC destroy a
-    running QThread (qFatal abort)."""
-    self._worker = worker
-    self._worker_thread = QThread()
-    worker.moveToThread(self._worker_thread)
-    self._worker_thread.started.connect(worker.run)
-    worker.finished.connect(done_slot)
+    """Run an align worker on its own thread. The reference is dropped only once
+    QThread.finished fires: releasing a running QThread is a qFatal abort."""
+    self._worker_thread = worker
+    worker.done.connect(done_slot)
     worker.error.connect(self._on_finalize_error)
-    worker.finished.connect(self._worker_thread.quit)
-    worker.error.connect(self._worker_thread.quit)
-    worker.finished.connect(worker.deleteLater)
-    worker.error.connect(worker.deleteLater)
-    self._worker_thread.finished.connect(self._on_finalize_thread_done)
-    self._worker_thread.start()
+    worker.finished.connect(self._on_finalize_thread_done)
+    worker.start()
 
   def _on_align_all(self):
-    """Align all regions into the timeline for review. No SRT write (Export SRT
+    """Align all regions into the timeline for editing. No SRT write (Export SRT
     does that). Runs finalize off the main thread."""
     if self._worker_thread is not None or not self._media_path:
       return
@@ -811,21 +841,18 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     assigned = sum(1 for a in assignments if a is not None)
     self._pull_manual_edits()
     print(f"\n=== Align all: {assigned}/{len(self._regions)} regions assigned")
-
-    self._align_all_act.setEnabled(False)
-    self._align_region_act.setEnabled(False)
-    self._lrc_as_is_act.setEnabled(False)
-
+    self._set_align_busy(True)
     self._start_worker(
       _FinalizeWorker(self._media_path, self._segments, self._audio,
-                      self._regions, assignments, self._romaji, self._opts),
+                      self._regions, assignments, self._romaji, self._opts,
+                      region_scored=[self._region_scored.get(i, [])
+                                     for i in range(len(self._regions))]),
       self._on_finalize_done)
 
   def _on_finalize_thread_done(self):
     if self._worker_thread is not None:
       self._worker_thread.deleteLater()
     self._worker_thread = None
-    self._worker = None
     self._refresh_region_actions()
 
   def _on_finalize_done(self, result):
@@ -840,6 +867,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
       self._tabs.setCurrentWidget(self._timeline)
       self._export_act.setEnabled(True)
       self._export_ass_act.setEnabled(True)
+      self._export_lrc_act.setEnabled(True)
     else:
       print("\n=== Align finished (no result)")
 
@@ -868,9 +896,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
       return
     tracklist = [(i + 1, t) for i, t in enumerate(titles)]
     print(f"\n=== Paste setlist: {len(tracklist)} tracks, fetching + matching")
-    self._align_all_act.setEnabled(False)
-    self._align_region_act.setEnabled(False)
-    self._lrc_as_is_act.setEnabled(False)
+    self._set_align_busy(True)
     self._start_worker(
       _SetlistAssignWorker(self._regions, tracklist, self._segments,
                            self._providers, self._artist_hint(), self._fresh),
@@ -920,13 +946,11 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
       self._say("  align region: no assignment for this region")
       return
     print(f"\n=== Align region {idx+1}")
-    self._align_all_act.setEnabled(False)
-    self._align_region_act.setEnabled(False)
-    self._lrc_as_is_act.setEnabled(False)
-
+    self._set_align_busy(True)
     self._start_worker(
       _AlignRegionWorker(self._segments, self._audio, self._regions[idx], idx,
-                         assignment, self._opts, self._regions),
+                         assignment, self._opts, self._regions,
+                         scored=self._region_scored.get(idx, [])),
       self._on_align_region_done)
 
   def _on_align_region_done(self, result):
@@ -951,6 +975,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._tabs.setCurrentWidget(self._timeline)
     self._export_act.setEnabled(True)
     self._export_ass_act.setEnabled(True)
+    self._export_lrc_act.setEnabled(True)
 
   # --- save / export ---
 
@@ -975,11 +1000,30 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     if not self._timeline.save(export=False):
       return
     from ..core.export import export_ass
-    cues = self._timeline._session.get("cues", [])
-    export_ass(self._media_path, cues,
-               offset=self._offset_spin.value(), lead=self._lead_spin.value())
+    from ..core.session import _translations
+    sess = self._timeline._session
+    export_ass(self._media_path, sess.get("cues", []),
+               offset=self._offset_spin.value(), lead=self._lead_spin.value(),
+               style=sess.get("ass_style"), translations=_translations(sess))
     self._exported = True
+    self._refresh_embed_action()
     print("  exported ASS")
+
+  def _on_export_lrc(self):
+    """Write the active region's cues back out as an .lrc, into the curated
+    library when one is configured, else beside the media. The library is the
+    fetch's first stop, so the next concert with this song starts corrected."""
+    from ..core.export import export_lrc
+    from ..core.providers import LYRICS_DIR
+    if not self._media_path:
+      return
+    idx = self._active_region or 0
+    region = self._regions[idx] if idx < len(self._regions) else None
+    chosen = self._region_chosen.get(idx)
+    out = export_lrc(self._media_path, list(self._timeline.canvas.cues), region,
+                     candidate=chosen[1] if chosen else None,
+                     out_dir=LYRICS_DIR if LYRICS_DIR.exists() else None)
+    self._say(f"  exported {out.name}")
 
   def _refresh_timeline_session_meta(self):
     """Refresh session metadata (regions may have moved) without dropping the
@@ -1000,15 +1044,21 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
   # --- cleanup ---
 
   def closeEvent(self, event):
+    if not self._confirm_discard("Close anyway?"):
+      event.ignore()
+      return
     self._picker.shutdown()
     if self._player is not None:
       self._player.setSource(QUrl())
       self._player = None
-    if self._play_timer is not None:
-      self._play_timer.stop()
     if self._worker_thread is not None:
-      self._worker_thread.quit()
-      self._worker_thread.wait(3000)
+      # _Job overrides run() with no event loop, so quit() cannot end it: ask it
+      # to stop, mute it so a late result never reaches a dead window, and say so
+      # when it outlives the wait
+      self._worker_thread.requestInterruption()
+      self._worker_thread.blockSignals(True)
+      if not self._worker_thread.wait(3000):
+        print("  closing while a job is still running")
     if self._prepare_worker is not None and self._prepare_worker.isRunning():
       self._prepare_worker.wait(3000)
     if self._transcribe_proc is not None:
@@ -1018,7 +1068,6 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
       self._embed_worker.wait(3000)
     uninstall_tee()
     super().closeEvent(event)
-
 
 def open_main_window(*, media_path=None, tags=None, segments=None,
                      media_dur_ms=0, providers=None, fresh=False,

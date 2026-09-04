@@ -1,30 +1,43 @@
-"""Single source for UI colors + app styling (dark theme).
+"""Single source for UI colors, fonts and app styling (dark theme).
 Every color literal lives here; timeline/picker/log import from it."""
 from PySide6.QtCore import Qt, QRectF, QPointF
 from PySide6.QtGui import (
-  QColor, QPalette, QIcon, QPixmap, QPainter, QPen, QPainterPath,
+  QColor, QFont, QPalette, QIcon, QPixmap, QPainter, QPen, QPainterPath,
 )
 
-# --- canvas / waveform ---
+# --- greys: two levels only, everything muted picks one ---
+GRAY = QColor(170, 170, 175)       # readable secondary text
+DIM = QColor(130, 130, 140)        # hints, disabled-ish, struck credits
+
+# --- surfaces ---
 BG = QColor(30, 30, 35)            # canvas background
 LANE = QColor(25, 25, 30)          # cue lane background
-CENTER_LINE = QColor(60, 60, 70)   # waveform center line
+SURFACE = QColor(45, 45, 50)       # window / toolbar
+SURFACE_HI = QColor(58, 58, 68)    # hover fill
+BASE = QColor(37, 37, 42)          # text/entry background
+BORDER = QColor(60, 60, 70)        # 1px separators, control outlines
+ACCENT = QColor(70, 130, 220)      # selection / focus
+TEXT = QColor(220, 220, 220)
+CENTER_LINE = BORDER               # waveform center line
 WAVE_PEAK = QColor(70, 160, 70)    # min/max peaks (dark green)
 WAVE_RMS = QColor(120, 220, 120)   # inner RMS band (bright green)
 ONSET = QColor(255, 200, 50, 60)   # onset marker (yellow)
 REGION_MARKER = QColor(255, 100, 100, 120)  # region boundary (red dashed)
 PLAYHEAD = QColor(255, 80, 80, 200)         # playhead line (red)
-RULER = QColor(140, 140, 140)      # time ruler major ticks/labels
+RULER = GRAY                       # time ruler major ticks/labels
 RULER_MINOR = QColor(95, 95, 105)  # unlabeled minor ticks
 RULER_BAND = QColor(38, 38, 45)    # ruler strip background (region-drag zone)
-CUE_TEXT = QColor(220, 220, 220)   # cue block label
-CUE_ROMAJI = QColor(150, 150, 165)  # cue block romaji second line
-EMPTY_HINT = QColor(140, 140, 150)  # canvas empty-state hint
+CUE_TEXT = TEXT                    # cue block label
+CUE_ROMAJI = DIM                   # cue block romaji second line
+EMPTY_HINT = DIM                   # canvas empty-state hint
 SELECTED_BORDER = QColor(255, 255, 255, 220)  # selected cue border
-PLAYING_FILL = QColor(255, 210, 130, 70)   # extra fill on cue under playhead (amber)
 PLAYING_BORDER = QColor(255, 210, 130, 230)  # accent border on cue under playhead
 
 # --- confidence block colors (defined here, re-exported by timeline) ---
+# amber: a cue or region the tool is least sure of, not an error
+CONF_LOW = QColor(235, 175, 70)
+CONF_LOW_BG = QColor(200, 140, 40, 55)
+
 CONF_COLORS = {
   "lrc": QColor(60, 180, 80, 80),
   "fa": QColor(60, 100, 200, 80),
@@ -44,16 +57,15 @@ CONF_BORDER = {
 }
 
 # --- picker / grid ---
-GRAY = QColor(160, 160, 160)       # below-threshold rows, romaji column
 PASTE_ROW = QColor(90, 150, 240)   # paste-row accent (readable blue on dark)
 ROMAJI_CYAN = QColor(100, 210, 220)  # romaji interleave in preview
-CREDIT_STRIKE = QColor(140, 140, 140)  # struck-through credit lines
-PLAYING_ROW = QColor(255, 210, 130, 45)  # grid row under playhead (matches PLAYING_FILL)
+CREDIT_STRIKE = DIM                # struck-through credit lines
+PLAYING_ROW = QColor(255, 210, 130, 40)  # grid row under playhead
 
 # --- log / hints (stylesheet fragments) ---
 LOG_BG = "#1e1e1e"
 LOG_FG = "#ccc"
-HINT_GRAY = "#888"
+HINT_GRAY = DIM.name()
 
 # log line coloring (by line shape, see gui/log.py)
 LOG_HEADER = QColor(120, 175, 255)   # === section headers
@@ -72,53 +84,84 @@ ICON_ALIGN = "#5a90d8"        # align region / all
 ICON_LRC = "#4ac06a"          # use LRC timestamps as-is (no alignment)
 ICON_ASR = "#c08adc"          # transcribe (generate ASR)
 
-
 # --- app-wide theming ---
 
+FONT_PT = 10.5     # base UI size in points, Qt scales points by DPI itself
+GROOVE = QColor(35, 35, 42)        # scrollbar groove
+HANDLE = QColor(106, 106, 122)     # scrollbar handle
+DISABLED = QColor(118, 118, 126)
+
+def font_pt(delta=0.0):
+  """UI size in points. Points are a physical unit and Qt scales them by the
+  screen DPI itself, so no DPI division here."""
+  return FONT_PT + delta
+
+def canvas_font(delta=-1.0):
+  """Waveform/ruler font, one step under the UI size."""
+  f = QFont("Segoe UI")
+  f.setPointSizeF(font_pt(delta=delta))
+  return f
+
 def apply_theme(app):
-  """Fusion style + dark QPalette + minimal app stylesheet."""
+  """Fusion style + dark QPalette + font token + minimal app stylesheet."""
   app.setStyle("Fusion")
 
+  f = app.font()
+  f.setPointSizeF(font_pt())
+  app.setFont(f)
+
   pal = QPalette()
-  base = QColor(37, 37, 42)
-  window = QColor(45, 45, 50)
-  text = QColor(220, 220, 220)
-  accent = QColor(70, 130, 220)
-  pal.setColor(QPalette.Window, window)
-  pal.setColor(QPalette.WindowText, text)
-  pal.setColor(QPalette.Base, base)
-  pal.setColor(QPalette.AlternateBase, window)
-  pal.setColor(QPalette.Text, text)
-  pal.setColor(QPalette.Button, window)
-  pal.setColor(QPalette.ButtonText, text)
-  pal.setColor(QPalette.ToolTipBase, base)
-  pal.setColor(QPalette.ToolTipText, text)
-  pal.setColor(QPalette.Highlight, accent)
+  pal.setColor(QPalette.Window, SURFACE)
+  pal.setColor(QPalette.WindowText, TEXT)
+  pal.setColor(QPalette.Base, BASE)
+  pal.setColor(QPalette.AlternateBase, SURFACE)
+  pal.setColor(QPalette.Text, TEXT)
+  pal.setColor(QPalette.Button, SURFACE)
+  pal.setColor(QPalette.ButtonText, TEXT)
+  pal.setColor(QPalette.ToolTipBase, BASE)
+  pal.setColor(QPalette.ToolTipText, TEXT)
+  pal.setColor(QPalette.Highlight, ACCENT)
   pal.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
-  pal.setColor(QPalette.Link, accent)
-  pal.setColor(QPalette.Disabled, QPalette.Text, QColor(120, 120, 125))
-  pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(120, 120, 125))
+  pal.setColor(QPalette.Link, ACCENT)
+  pal.setColor(QPalette.Disabled, QPalette.Text, DISABLED)
+  pal.setColor(QPalette.Disabled, QPalette.ButtonText, DISABLED)
   app.setPalette(pal)
 
+  css = {k: v.name() for k, v in (("hi", SURFACE_HI), ("bd", BORDER),
+                                  ("gr", GROOVE), ("hd", HANDLE),
+                                  ("ac", ACCENT), ("bg", BASE))}
   app.setStyleSheet(
-    "QToolBar { border: 0; padding: 2px; spacing: 3px; }"
-    "QToolButton { padding: 3px; border-radius: 3px; }"
-    "QToolButton:hover { background: #3a3a44; }"
-    "QMenuBar { padding: 1px; }"
-    "QMenuBar::item:selected { background: #3a3a44; }"
-    "QToolTip { border: 1px solid #555; padding: 2px; }"
+    "QToolBar {{ border: 0; padding: 4px; spacing: 4px; }}"
+    "QToolButton {{ padding: 4px; border-radius: 4px; }}"
+    "QToolButton:hover {{ background: {hi}; }}"
+    "QToolButton:focus, QPushButton:focus {{ border: 1px solid {ac}; }}"
+    "QMenuBar {{ padding: 2px; }}"
+    "QMenuBar::item:selected {{ background: {hi}; }}"
+    "QToolTip {{ border: 1px solid {bd}; padding: 4px; }}"
+    "QHeaderView::section {{ background: {bg}; border: 0;"
+    " border-bottom: 1px solid {bd}; padding: 4px; }}"
+    "QTableWidget, QTreeWidget {{ gridline-color: {bd};"
+    " selection-background-color: {ac}; }}"
+    "QTableWidget::item, QTreeWidget::item {{ padding: 2px 4px; }}"
+    # hover reads as a 1px outline, so only the selection is filled
+    "QTableWidget::item:hover, QTreeWidget::item:hover {{"
+    " border: 1px solid {hd}; }}"
+    "QLineEdit, QComboBox, QDoubleSpinBox {{ border: 1px solid {bd};"
+    " border-radius: 4px; padding: 2px 4px; }}"
+    "QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus {{"
+    " border: 1px solid {ac}; }}"
     # scrollbars need a contrasting groove, else they read as empty space
-    "QScrollBar:horizontal { background: #23232a; border: 1px solid #3c3c46;"
-    " border-radius: 5px; height: 12px; margin: 0 12px; }"
-    "QScrollBar:vertical { background: #23232a; border: 1px solid #3c3c46;"
-    " border-radius: 5px; width: 12px; margin: 12px 0; }"
-    "QScrollBar::handle { background: #6a6a7a; border-radius: 4px; }"
-    "QScrollBar::handle:hover { background: #8790a8; }"
-    "QScrollBar::handle:horizontal { min-width: 24px; }"
-    "QScrollBar::handle:vertical { min-height: 24px; }"
-    "QScrollBar::add-line, QScrollBar::sub-line { background: none; border: none; }"
-    "QScrollBar::add-page, QScrollBar::sub-page { background: none; }")
-
+    "QScrollBar:horizontal {{ background: {gr}; border: 1px solid {bd};"
+    " border-radius: 5px; height: 12px; margin: 0 12px; }}"
+    "QScrollBar:vertical {{ background: {gr}; border: 1px solid {bd};"
+    " border-radius: 5px; width: 12px; margin: 12px 0; }}"
+    "QScrollBar::handle {{ background: {hd}; border-radius: 4px; }}"
+    "QScrollBar::handle:hover {{ background: {ac}; }}"
+    "QScrollBar::handle:horizontal {{ min-width: 24px; }}"
+    "QScrollBar::handle:vertical {{ min-height: 24px; }}"
+    "QScrollBar::add-line, QScrollBar::sub-line {{ background: none; border: none; }}"
+    "QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}"
+    .format(**css))
 
 # --- icons ---
 # One hand-drawn 16px family so every toolbar/menu icon shares stroke weight,
@@ -132,7 +175,6 @@ STROKE = 1.4
 # shared block geometry: cue block, ruler baseline
 _BLOCK = (2.5, 4.5, 11.0, 7.0)  # x, y, w, h
 
-
 def _stroke(p, color, width=STROKE):
   pen = QPen(QColor(color))
   pen.setWidthF(width)
@@ -140,7 +182,6 @@ def _stroke(p, color, width=STROKE):
   pen.setJoinStyle(Qt.RoundJoin)
   p.setPen(pen)
   p.setBrush(Qt.NoBrush)
-
 
 def _tri(p, color, pts):
   path = QPainterPath()
@@ -150,7 +191,6 @@ def _tri(p, color, pts):
   path.closeSubpath()
   p.fillPath(path, QColor(color))
 
-
 def _rot_arrow(p, color, clockwise):
   """3/4-circle rotation arrow with a tangential head (undo = ccw, redo = cw)."""
   import math
@@ -158,7 +198,7 @@ def _rot_arrow(p, color, clockwise):
   start, span = (200, -250) if clockwise else (-20, 250)
   _stroke(p, color)
   p.drawArc(QRectF(cx - r, cy - r, 2 * r, 2 * r), start * 16, span * 16)
-  # head at the arc end, pointing along the sweep direction
+  # head at the arc end, pointing along the arc direction
   a = math.radians(start + span)
   tipx, tipy = cx + r * math.cos(a), cy - r * math.sin(a)
   sgn = 1 if span > 0 else -1
@@ -170,13 +210,11 @@ def _rot_arrow(p, color, clockwise):
     (tipx - dx * 1.2 - px * 2.1, tipy - dy * 1.2 - py * 2.1),
   ])
 
-
 def _block(p, color, x=None, y=None, w=None, h=None):
   bx, by, bw, bh = _BLOCK
   _stroke(p, color)
   p.drawRoundedRect(QRectF(x if x is not None else bx, y if y is not None else by,
                            w if w is not None else bw, h if h is not None else bh), 1.5, 1.5)
-
 
 def _d_open(p, c):
   _stroke(p, c)
@@ -190,30 +228,30 @@ def _d_open(p, c):
   path.closeSubpath()
   p.drawPath(path)
 
-
 def _d_save(p, c):
   _stroke(p, c)
   p.drawRoundedRect(QRectF(2.5, 2.5, 11, 11), 1.5, 1.5)
   p.drawRect(QRectF(5.5, 2.5, 5, 3.5))   # shutter
   p.drawRect(QRectF(4.5, 9, 7, 4.5))     # label
 
-
 def _d_export(p, c):
   """Subtitle page with an arrow leaving it (write SRT)."""
-  _stroke(p, c)
-  p.drawRect(QRectF(2, 2.5, 8, 11))
+  _page_out(p, c)
   for y in (5.5, 8, 10.5):  # subtitle lines
     p.drawLine(QPointF(4, y), QPointF(8, y))
+
+def _page_out(p, c):
+  """Shared page + outgoing arrow, the export family's base shape."""
+  _stroke(p, c)
+  p.drawRect(QRectF(2, 2.5, 8, 11))
   p.drawLine(QPointF(9, 11.5), QPointF(13.5, 11.5))
   _tri(p, c, [(15, 11.5), (12.2, 9.5), (12.2, 13.5)])
-
 
 def _d_add(p, c):
   _block(p, c)
   _stroke(p, c)
   p.drawLine(QPointF(8, 5.8), QPointF(8, 10.2))
   p.drawLine(QPointF(5.8, 8), QPointF(10.2, 8))
-
 
 def _d_delete(p, c):
   """Trash can: destructive, so it breaks the cue-block family on purpose."""
@@ -229,7 +267,6 @@ def _d_delete(p, c):
   for x in (6.6, 9.4):                                     # ribs
     p.drawLine(QPointF(x, 6.5), QPointF(x + 0.15, 11.5))
 
-
 def _d_split(p, c):
   """One block cut in two, halves pushed apart."""
   _block(p, c, x=1.5, w=5)
@@ -238,14 +275,12 @@ def _d_split(p, c):
   p.setPen(QPen(QColor(c), STROKE, Qt.DotLine))
   p.drawLine(QPointF(8, 3), QPointF(8, 13))
 
-
 def _d_merge(p, c):
   """Two blocks pulled together into one span."""
   _block(p, c, x=0.5, w=4.5)
   _block(p, c, x=11, w=4.5)
   _tri(p, c, [(9.6, 8), (6.4, 5.6), (6.4, 10.4)])
   _tri(p, c, [(6.4, 8), (9.6, 5.6), (9.6, 10.4)])
-
 
 def _align_icon(p, c, filled):
   """Three cue blocks over a timeline baseline; `filled` marks the targets."""
@@ -260,14 +295,11 @@ def _align_icon(p, c, filled):
       p.drawRect(rect)
     p.fillRect(QRectF(x + 1.5, 11.0, 1, 1.6), QColor(c))  # tick to baseline
 
-
 def _d_align_region(p, c):
   _align_icon(p, c, filled={1})
 
-
 def _d_align_all(p, c):
   _align_icon(p, c, filled={0, 1, 2})
-
 
 def _d_lrc_as_is(p, c):
   """Clock over two cue blocks: LRC timestamps taken as they are."""
@@ -278,17 +310,12 @@ def _d_lrc_as_is(p, c):
   for x in (1.5, 8.5):
     p.drawRoundedRect(QRectF(x, 10, 6, 4), 1.2, 1.2)
 
-
 def _d_export_ass(p, c):
   """Export page marked with an A: styled .ass output."""
-  _stroke(p, c)
-  p.drawRect(QRectF(2, 2.5, 8, 11))
-  p.drawLine(QPointF(9, 11.5), QPointF(13.5, 11.5))
-  _tri(p, c, [(15, 11.5), (12.2, 9.5), (12.2, 13.5)])
+  _page_out(p, c)
   p.drawLine(QPointF(4, 9), QPointF(6, 4))      # A
   p.drawLine(QPointF(6, 4), QPointF(8, 9))
   p.drawLine(QPointF(4.9, 7), QPointF(7.1, 7))
-
 
 # --- region status marks (St column) ---
 
@@ -296,9 +323,8 @@ STATUS_COLORS = {
   "setlist": QColor(235, 195, 90),    # from a known setlist
   "found": QColor(110, 200, 120),     # confident match
   "ambiguous": QColor(220, 165, 70),  # weak match, needs a look
-  "none": QColor(150, 150, 158),      # nothing found
+  "none": DIM,                        # nothing found
 }
-
 
 def _d_st_setlist(p, c):
   import math
@@ -311,22 +337,18 @@ def _d_st_setlist(p, c):
   path.closeSubpath()
   p.fillPath(path, QColor(c))
 
-
 def _d_st_found(p, c):
   p.setBrush(QColor(c))
   p.setPen(Qt.NoPen)
   p.drawEllipse(QRectF(3.5, 3.5, 9, 9))
 
-
 def _d_st_ambiguous(p, c):
   _stroke(p, c, 1.8)
   p.drawEllipse(QRectF(3.5, 3.5, 9, 9))
 
-
 def _d_st_none(p, c):
   _stroke(p, c, 1.8)
   p.drawLine(QPointF(4, 8), QPointF(12, 8))
-
 
 def status_icon(status):
   """Region status mark for the St column. Unknown/None → blank icon."""
@@ -334,14 +356,11 @@ def status_icon(status):
     return QIcon()
   return icon(f"st_{status}", STATUS_COLORS[status])
 
-
 def _d_play(p, c):
   _tri(p, c, [(4.5, 3), (13, 8), (4.5, 13)])
 
-
 def _d_stop(p, c):
   p.fillRect(QRectF(4, 4, 8, 8), QColor(c))
-
 
 def _d_fit(p, c):
   _stroke(p, c)
@@ -351,7 +370,6 @@ def _d_fit(p, c):
   _tri(p, c, [(3.5, 8), (6.2, 5.8), (6.2, 10.2)])
   _tri(p, c, [(12.5, 8), (9.8, 5.8), (9.8, 10.2)])
 
-
 def _d_transcribe(p, c):
   """Microphone: generate ASR transcript from audio."""
   _stroke(p, c)
@@ -359,7 +377,6 @@ def _d_transcribe(p, c):
   p.drawArc(QRectF(4, 4.5, 8, 7), 200 * 16, 140 * 16)    # cradle
   p.drawLine(QPointF(8, 11.2), QPointF(8, 13.5))         # stand
   p.drawLine(QPointF(5.5, 13.5), QPointF(10.5, 13.5))    # base
-
 
 def _d_cleanup(p, c):
   """Broom sweeping: clear stray files."""
@@ -369,7 +386,6 @@ def _d_cleanup(p, c):
   for dx, dy in ((0.4, 0.9), (1.0, 0.4), (-0.2, 1.3)):   # bristle tips
     p.drawLine(QPointF(5.4 + dx * 2, 12.6 + dy), QPointF(5.4 + dx * 2 + 0.6, 13.8 + dy))
 
-
 def _d_embed(p, c):
   """Film frame with a subtitle bar: mux SRT into the video."""
   _stroke(p, c)
@@ -378,7 +394,6 @@ def _d_embed(p, c):
     p.fillRect(QRectF(3.0, y, 1.2, 1.4), QColor(c))
     p.fillRect(QRectF(11.8, y, 1.2, 1.4), QColor(c))
   p.fillRect(QRectF(5.5, 10.2, 5, 1.4), QColor(c))       # subtitle bar
-
 
 _DRAW = {
   "open": _d_open, "save": _d_save, "export": _d_export,
@@ -392,7 +407,6 @@ _DRAW = {
   "st_setlist": _d_st_setlist, "st_found": _d_st_found,
   "st_ambiguous": _d_st_ambiguous, "st_none": _d_st_none,
 }
-
 
 def _draw_app_mark(p, s):
   """App mark in an s x s box: waveform bars over a subtitle bar, dark tile."""
@@ -413,7 +427,6 @@ def _draw_app_mark(p, s):
   p.setBrush(QColor(150, 150, 160))
   p.drawRoundedRect(QRectF(18, 54, 28, 5), 2.5, 2.5)
 
-
 def app_icon():
   """Window/taskbar icon, rendered at the sizes Windows picks from."""
   ic = QIcon()
@@ -425,7 +438,6 @@ def app_icon():
     p.end()
     ic.addPixmap(pm)
   return ic
-
 
 def icon(name, color=CUE_TEXT):
   """Drawn 16px icon by name. Unknown name → null icon."""

@@ -11,11 +11,9 @@ from . import theme
 
 _original_stdout = None
 
-
 class LogBridge(QObject):
   """Thread-safe bridge: emits line(str) on queued connection."""
   line = Signal(str)
-
 
 class TeeStream:
   """Wraps sys.stdout so writes go to real terminal + LogBridge signal.
@@ -59,7 +57,6 @@ class TeeStream:
   def encoding(self):
     return getattr(self._real, "encoding", "utf-8")
 
-
 def install_tee(bridge):
   """Replace sys.stdout with TeeStream. Safe to call once; handles
   pythonw where sys.stdout is None."""
@@ -72,14 +69,12 @@ def install_tee(bridge):
   if sys.stderr is None:
     sys.stderr = TeeStream(None, bridge)
 
-
 def uninstall_tee():
   """Restore original sys.stdout."""
   global _original_stdout
   if _original_stdout is not None or isinstance(sys.stdout, TeeStream):
     sys.stdout = _original_stdout
     _original_stdout = None
-
 
 def _line_format(text):
   """Color a log line by its shape: headers, written files, problems, detail."""
@@ -97,7 +92,6 @@ def _line_format(text):
   elif text.startswith("  "):
     fmt.setForeground(QBrush(theme.LOG_DETAIL))
   return fmt
-
 
 class LogDock(QDockWidget):
   """Read-only monospace log panel. Auto-scrolls only when at bottom."""

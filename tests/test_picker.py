@@ -2,7 +2,6 @@
 from utasub.core.providers import Candidate
 from utasub.gui.picker import PickerPanel, build_alternates
 
-
 def _fake_scored():
   """Three candidates spanning above/below threshold."""
   return [
@@ -14,10 +13,8 @@ def _fake_scored():
                      "NetEase", 150000, "[00:01.00] wrong song")),
   ]
 
-
 def _fake_tags():
   return {"title": "Good Match", "album": "Album A", "artist": "Artist X/Artist W"}
-
 
 def _panel(scored=None):
   """Build a panel and inject scored rows (skips network)."""
@@ -26,13 +23,11 @@ def _panel(scored=None):
     p.populate(scored)
   return p
 
-
 def test_populate_adds_scored_rows_plus_paste_row():
   """Table has N scored rows + 1 paste-row."""
   scored = _fake_scored()
   p = _panel(scored)
   assert p.table.rowCount() == len(scored) + 1
-
 
 def test_prefill_alternates_from_tags():
   """build_alternates surfaces title + split artists from tags; panel binds
@@ -42,7 +37,6 @@ def test_prefill_alternates_from_tags():
   artists = [v for v, _ in alts["artist"]]
   assert "Artist X" in artists and "Artist W" in artists
   assert _panel().title_combo.lineEdit().text() == "Good Match"
-
 
 def test_paste_row_enables_editing_and_returns_manual_candidate():
   """Selecting paste-row makes preview editable and yields a Manual candidate."""
@@ -55,7 +49,6 @@ def test_paste_row_enables_editing_and_returns_manual_candidate():
   assert ch is not None and ch[1].source == "Manual"
   assert "[00:01.00] manual line" in ch[1].lrc
 
-
 def test_paste_text_persists_across_row_switch():
   """Pasted text survives switching to another row and back."""
   scored = _fake_scored()
@@ -67,7 +60,6 @@ def test_paste_text_persists_across_row_switch():
   p.table.selectRow(paste_row)
   assert p.preview.toPlainText() == "[00:02.00] kept line"
 
-
 def test_selecting_row_returns_that_candidate():
   """chosen_candidate returns the selected row's candidate."""
   scored = _fake_scored()
@@ -76,14 +68,12 @@ def test_selecting_row_returns_that_candidate():
   ch = p.chosen_candidate()
   assert ch is not None and ch[1].title == "OK Match"
 
-
 def test_empty_candidates_shows_only_paste_row():
   """Zero candidates: paste-row only, editable."""
   p = _panel([])
   assert p.table.rowCount() == 1
   p.table.selectRow(0)
   assert not p.preview.isReadOnly()
-
 
 def test_row_change_only_previews_and_apply_button_follows_selection():
   """Row selection previews only; nothing applies until button fires.
@@ -103,7 +93,6 @@ def test_row_change_only_previews_and_apply_button_follows_selection():
   assert p.apply_btn.isEnabled()
   p.apply_btn.click()
   assert fired
-
 
 def test_superseded_search_results_are_ignored():
   """Late results from a parked worker must not repopulate table or re-enable
