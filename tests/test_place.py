@@ -2,11 +2,11 @@
 chain fallthrough. No GPU needed (monkeypatched aligners)."""
 import pytest
 
+from utasub.core.ctc_align import low_conf_cut
 
 def _make_lines(n=20, spacing=5.0, offset=0.0):
   """Synthetic timed LRC lines."""
   return [(offset + i * spacing, f"line {i} text here") for i in range(n)]
-
 
 def _make_segments(lines, jitter=0.2):
   """Fake ASR segments from LRC lines with small jitter."""
@@ -19,17 +19,14 @@ def _make_segments(lines, jitter=0.2):
     segs.append((s, e, txt.replace("line", "lyne")))  # garbled
   return segs
 
-
 def _fake_audio(duration_s=120.0, sr=16000):
   """Silent audio array."""
   import numpy as np
   return np.zeros(int(duration_s * sr), dtype=np.float32)
 
-
 # --- monkeypatch the aligners ---
 
 _fa_offset = 1.5  # the aligners return LRC times + this offset
-
 
 def _fa_truth(truth):
   """Qwen FA mock (coarse_fa path) reporting true audio time regardless of seed."""
@@ -38,7 +35,6 @@ def _fa_truth(truth):
     return ({j: t for j, t in enumerate(truth)},
             {j: t + 2.0 for j, t in enumerate(truth)})
   return _align
-
 
 def _patch_ctc(monkeypatch, truth, score=-0.5):
   """Stand in for the global CTC pass: stamps every line at its true time."""
@@ -51,7 +47,6 @@ def _patch_ctc(monkeypatch, truth, score=-0.5):
   monkeypatch.setattr(ctc_align, "align_lines", _align_lines)
   monkeypatch.setattr(ctc_align, "ctc_available", lambda: True)
 
-
 def _mock_force_align_lines(starts, texts, audio, sr=16000, pre_pad=5.0,
                             post_pad=10.0, drift_gate=8.0):
   """Seed-relative mock, for the coarse paths that only run FA once."""
@@ -59,17 +54,14 @@ def _mock_force_align_lines(starts, texts, audio, sr=16000, pre_pad=5.0,
   fa_ends = {j: starts[j] + _fa_offset + 2.0 for j in range(len(starts))}
   return fa_starts, fa_ends
 
-
 def _mock_fa_available():
   return True
-
 
 def _patch_fa(monkeypatch, align_fn, available_fn=_mock_fa_available):
   """Swap fa.force_align_lines / fa.fa_available; auto-restored by monkeypatch."""
   from utasub.core import fa
   monkeypatch.setattr(fa, "force_align_lines", align_fn)
   monkeypatch.setattr(fa, "fa_available", available_fn)
-
 
 # --- warp fit ---
 
@@ -86,7 +78,6 @@ def test_warp_single_segment(monkeypatch):
   starts = [c.start for c in cues if hasattr(c, "confidence") and c.confidence]
   assert abs(starts[0] - (lines[0][0] + _fa_offset)) < 0.3
   assert abs((starts[5] - starts[4]) - 5.0) < 0.1, "LRC interval not preserved"
-
 
 def test_warp_fits_inserted_gap():
   """An inserted instrumental gets a second segment, but only where the audio is silent."""
@@ -105,7 +96,6 @@ def test_warp_fits_inserted_gap():
   segs2, diag2 = fit_warp(anchors, lrc, [(2.0, 130.0)])
   assert diag2["segments"] == 1, "jump accepted without a silent seam"
 
-
 def test_warp_recovers_steep_slope():
   """A take 24% slower than the studio cut fits as one steep segment, not a stack
   of fake gap insertions."""
@@ -120,7 +110,6 @@ def test_warp_recovers_steep_slope():
   assert not diag["jumps"], diag["jumps"]
   placed = apply_warp(lrc, segs)
   assert max(abs(p - a) for p, (_, a) in zip(placed, anchors)) < 0.5
-
 
 def test_warp_rejects_break_into_unmeasured_slope():
   """A seam into a tail too sparse to measure a slope is refused."""
@@ -138,7 +127,6 @@ def test_warp_rejects_break_into_unmeasured_slope():
     f"broke into an unmeasured segment: {diag['segments']} segs, {diag['slopes']}")
   assert abs(diag["slopes"][0] - 1.238) < 0.02, diag["slopes"]
 
-
 def test_warp_rejects_a_tempo_below_the_slope_floor():
   """Tail slope under SLOPE_LO is a fitter-invented tempo drop; rejecting it
   leaves tail unmeasured, seam gate collapses to one segment."""
@@ -151,7 +139,6 @@ def test_warp_rejects_a_tempo_below_the_slope_floor():
   segs, diag = fit_warp(anchors, lrc, [(30.0, 290.0)])
   assert diag["segments"] == 1, f"invented a tempo drop: {diag['slopes']}"
   assert all(s >= SLOPE_LO for s in diag["slopes"]), diag["slopes"]
-
 
 def test_collect_returns_the_global_pass_ungated(monkeypatch):
   """collect hands warp every stamp, gates nothing: fit_warp's own chain
@@ -183,7 +170,6 @@ def test_collect_returns_the_global_pass_ungated(monkeypatch):
                       lambda texts, audio, sr=16000: ({0: 1.0}, {0: 3.0}, {0: -0.5}))
   assert collect(lrc, [t for _, t in lines], _fake_audio())[0] == []
 
-
 def test_adopt_fa_takes_gated_stamps_within_the_bound():
   """Every gated stamp near placement is taken outright; one a second away is
   a smeared line, left alone. Order survives either way."""
@@ -196,7 +182,6 @@ def test_adopt_fa_takes_gated_stamps_within_the_bound():
   # a within-bound stamp that would cross its predecessor is repaired, not refused
   assert _adopt_fa([10.0, 11.0], {1: 9.5})[1] == pytest.approx(10.05)
   assert _adopt_fa(base, {}) == base
-
 
 def test_warp_preserves_monotonicity():
   """apply_warp never goes backwards, whatever the segments say."""
@@ -212,7 +197,6 @@ def test_warp_preserves_monotonicity():
   assert apply_warp(lrc, segs2) == [2.0, 7.0, 24.0, 30.0]
   assert warped_durations(lrc, segs2)[:3] == [5.0, 5.0, 6.0]
 
-
 def test_warp_rejects_without_anchors(monkeypatch):
   """No CTC stamps: nothing to fit, so the strategy rejects."""
   _patch_ctc(monkeypatch, [])
@@ -224,7 +208,6 @@ def test_warp_rejects_without_anchors(monkeypatch):
   assert _lrc_warp(lines, segments, audio, use_fa=True,
                    runs_lo=[(3.0, 60.0)]) is None
 
-
 def test_lrc_warp_needs_no_transcript(monkeypatch):
   """Global pass takes no seed: region with no usable transcript still places."""
   lines = _make_lines(12, spacing=5.0, offset=1.0)
@@ -235,7 +218,6 @@ def test_lrc_warp_needs_no_transcript(monkeypatch):
   assert result is not None, "no-transcript region rejected"
   assert result[2]["strategy"] == "lrc_warp"
 
-
 def test_lrc_warp_rejects_without_the_ctc_aligner(monkeypatch):
   """torchaudio absent: no anchors possible, chain falls through."""
   from utasub.core import ctc_align
@@ -245,7 +227,6 @@ def test_lrc_warp_rejects_without_the_ctc_aligner(monkeypatch):
   assert _lrc_warp(lines, _make_segments(lines), _fake_audio(120.0),
                    use_fa=True, runs_lo=[(3.0, 60.0)]) is None
 
-
 def test_lrc_warp_needs_fa(monkeypatch):
   """FA off: nothing can fit a warp, chain falls through."""
   from utasub.core.place import _lrc_warp
@@ -253,13 +234,11 @@ def test_lrc_warp_needs_fa(monkeypatch):
   assert _lrc_warp(lines, _make_segments(lines), _fake_audio(120.0),
                    use_fa=False, runs_lo=[(3.0, 60.0)]) is None
 
-
 def test_no_audio_skips_lrc_warp():
   """_lrc_warp returns None when no audio available."""
   from utasub.core.place import _lrc_warp
   lines = _make_lines(10, spacing=5.0)
   assert _lrc_warp(lines, _make_segments(lines), None, use_fa=True) is None
-
 
 def test_chain_fallthrough(monkeypatch):
   """lrc_warp wins when it fits; chain falls to coarse_fa when it can't;
@@ -298,7 +277,6 @@ def test_chain_fallthrough(monkeypatch):
   assert meta5["strategy"] in ("coarse_fa", "coarse_envelope"), \
     f"untimed should skip lrc_warp, got {meta5['strategy']}"
 
-
 def test_rescue_from_silence_moves_forward_only():
   """A start stranded in an unvoiced gap is carried forward to next voiced run:
   never backward, never out of voice, never past SILENCE_REACH."""
@@ -318,7 +296,6 @@ def test_rescue_from_silence_moves_forward_only():
   # no envelope at all: nothing to rescue against
   assert _rescue_from_silence(18.2, []) == 18.2
 
-
 def test_linear_anchors_drops_wrong_occurrence_stamps():
   """A stamp matched to an earlier repeat lands in order; only the impossible
   tempo it implies on both sides separates it."""
@@ -333,7 +310,6 @@ def test_linear_anchors_drops_wrong_occurrence_stamps():
   assert 7 not in kept and 13 not in kept, f"kept a wrong-occurrence stamp: {kept}"
   assert len(kept) == 18, f"dropped a good anchor too: {sorted(kept)}"
 
-
 def test_linear_anchors_keeps_a_take_that_inserted_material():
   """Anchors costing most of the set are a real insertion, not noise: leave
   them for the changepoint fit."""
@@ -343,3 +319,86 @@ def test_linear_anchors_keeps_a_take_that_inserted_material():
   anchors = [(j, 20.0 + lrc[j] + (0.0 if j < 10 else 30.0)) for j in range(20)]
   kept = linear_anchors(anchors, lrc)
   assert len(kept) == 20, f"discarded a real gap insertion, kept {len(kept)}"
+
+# --- gap 5 / gap 3: per-cue CTC evidence ---
+
+def test_low_conf_cut_is_a_per_song_percentile():
+  """Absolute scores move with the mix and the singer, the ranking inside one
+  song does not, so the cut is drawn from the song's own scores."""
+  scores = [0.1 * i for i in range(1, 21)]
+  cut = low_conf_cut(scores, pct=10)
+  assert sum(1 for s in scores if s < cut) == 2, cut
+  quiet = [s * 0.1 for s in scores]  # same song mixed 10x quieter
+  assert sum(1 for s in quiet if s < low_conf_cut(quiet, pct=10)) == 2
+
+def test_low_conf_cut_ignores_unstamped_cues():
+  assert low_conf_cut([0.9, None, 0.8, None, 0.7, 0.6, 0.5]) == 0.5
+
+def test_low_conf_cut_flags_a_song_that_is_bad_all_through():
+  """A pure percentile flags a tenth of every song, however good or bad it is.
+  Under the absolute floor a badly stamped song flags all of it, and a handful
+  of stamps still gets a verdict instead of nothing."""
+  import math
+  floor = math.log(0.2)
+  bad = [math.log(0.1)] * 20
+  assert sum(1 for s in bad if s < low_conf_cut(bad)) == 20, "only a tenth flagged"
+  assert low_conf_cut([0.9, 0.2, 0.5]) == floor, "too few to rank, floor still applies"
+  assert low_conf_cut([None] * 20) is None
+
+def test_ctc_evidence_lands_only_on_adopted_lines(monkeypatch):
+  """A snapped line's spans time audio the cue no longer covers, so a fill
+  built from them would drift: only adopted stamps carry evidence."""
+  from utasub.core import ctc_align, place
+  from utasub.core.align import Cue
+  monkeypatch.setattr(ctc_align, "last_token_spans",
+                      {0: [("a", 10.0, 10.5), ("b", 10.5, 11.0)],
+                       1: [("c", 30.0, 30.4)]})
+  cues = [Cue(10.0, 12.0, "one", "lrc"), Cue(20.0, 22.0, "two", "lrc")]
+  place._attach_ctc_evidence(cues, {0}, {0: 0.9, 1: 0.3})
+  assert cues[0].score == 0.9
+  assert getattr(cues[1], "score", None) is None
+  assert getattr(cues[1], "token_spans", None) is None
+
+def test_ctc_spans_are_stored_relative_to_the_cue_start(monkeypatch):
+  """Stored absolute, a region offset or a hand drag would desync the fill."""
+  from utasub.core import ctc_align, place
+  from utasub.core.align import Cue
+  monkeypatch.setattr(ctc_align, "last_token_spans",
+                      {0: [("a", 10.2, 10.5), ("b", 10.5, 11.0)]})
+  cues = [Cue(10.0, 12.0, "one", "lrc")]
+  place._attach_ctc_evidence(cues, {0}, {0: 0.9})
+  assert cues[0].token_spans == [("a", 0.2, 0.5), ("b", 0.5, 1.0)]
+
+def test_plain_text_lines_get_ctc_evidence(monkeypatch):
+  """No LRC timestamps, so the chain falls to coarse_fa: the global CTC pass
+  still runs, every line scores and the adopted ones carry spans."""
+  from utasub.core import ctc_align
+  from utasub.core.align import Cue
+  from utasub.core.place import AlignOpts, run_chain
+  lines = _make_lines(20, spacing=5.0)
+  truth = [t + _fa_offset for t, _ in lines]
+  segments = _make_segments(lines)
+  monkeypatch.setattr(ctc_align, "last_token_spans", {})
+  monkeypatch.setattr(ctc_align, "ctc_available", lambda: True)
+
+  def _align_lines(texts, audio, sr=16000):
+    ctc_align.last_token_spans.update(
+      {j: [("a", t, t + 0.3), ("b", t + 0.3, t + 0.6)] for j, t in enumerate(truth)})
+    return ({j: t for j, t in enumerate(truth)},
+            {j: t + 2.0 for j, t in enumerate(truth)},
+            {j: -0.5 for j in range(len(truth))})
+  monkeypatch.setattr(ctc_align, "align_lines", _align_lines)
+  _patch_fa(monkeypatch, _fa_truth(truth))
+
+  untimed = [(None, t) for _, t in lines]
+  cues, _, meta = run_chain(untimed, segments, _fake_audio(200.0),
+                            AlignOpts(use_fa=True))
+  assert meta["strategy"] == "coarse_fa", meta
+  placed = [c for c in cues if isinstance(c, Cue) and c.confidence != "mc"]
+  assert len(placed) == 20
+  assert all(c.score is not None for c in placed), "a line came back unscored"
+  assert all(c.token_spans for c in placed), "no karaoke spans on an adopted line"
+  assert meta["ctc_adopted"] == 20, meta
+  assert abs(placed[3].start - truth[3]) < 0.05
+  assert placed[3].end <= truth[3] + 2.0 + 1e-6, "ctc end did not trim the cue"
+  assert placed[0].token_spans[0] == ("a", 0.0, 0.3)

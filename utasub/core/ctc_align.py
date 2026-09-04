@@ -13,6 +13,7 @@ chain filters already discard outliers.
 
 Absence of torchaudio degrades with a message, never crashes.
 """
+import math
 import statistics
 
 SR = 16000
@@ -21,10 +22,20 @@ SR = 16000
 # stays one forced_align over the concatenated emission
 EMIT_CHUNK, EMIT_CTX = 30.0, 1.5
 GATE_PCT = 10  # drop this % of lines by mean token log-prob before direct use
+# score thresholds, as per-token probabilities (exp of the stored log-prob)
+CONF_FLOOR = 0.2        # under this the stamp is bad whatever the song sounds like
+CONF_GOOD_MEDIAN = 0.5  # over this the song is clean, so ranking beats the floor
 
 _model_cache = []
 _available = None
 
+# Per-line token spans [(char, start, end)] from the most recent align_lines
+# call, for karaoke \kf runs. Kept here rather than returned, so the 3-tuple
+# signature anchors.collect unpacks stays as it is; the pipeline runs one pass
+# per region on one thread, and place.py reads it straight after collect().
+last_token_spans = {}
+
+# ━━━━━━ model and emission ━━━━━━
 
 def ctc_available():
   """True when torch + torchaudio (with MMS_FA) are importable."""
@@ -38,7 +49,6 @@ def ctc_available():
       _available = False
   return _available
 
-
 def load_model():
   """Lazy MMS_FA bundle with the star label. (model, dict, torch, device)."""
   if not _model_cache:
@@ -50,7 +60,6 @@ def load_model():
     _model_cache.append((bundle.get_model(with_star=True).eval().to(dev),
                          bundle.get_dict(star="<star>"), torch, dev))
   return _model_cache[0]
-
 
 def _emission(model, audio, torch, dev):
   """(log-prob emission over the whole span, seconds per frame).
@@ -73,26 +82,32 @@ def _emission(model, audio, torch, dev):
   em = torch.cat(parts).unsqueeze(0)
   return em, len(audio) / em.shape[1] / SR
 
-
 def _line_tokens(texts, dictionary):
-  """[(line_idx, [token ids])], one entry per line that romanizes to anything."""
+  """[(line_idx, [token ids], [romaji chars])], one entry per line that
+  romanizes to anything. The char list is the same sequence as the ids, so a
+  token span maps back to the romaji character it timed."""
   from .romanize import detect, get_default_locale, romanize
   locale = get_default_locale() or detect(" ".join(texts))
   out = []
   for j, text in enumerate(texts):
     rom = romanize(text, locale=locale) or text
     # '-' is the blank label in the MMS dict, never a target
-    ids = [dictionary[c] for w in rom.lower().split() for c in w
-           if c in dictionary and c != "-"]
-    if ids:
-      out.append((j, ids))
+    chars = [c for w in rom.lower().split() for c in w
+             if c in dictionary and c != "-"]
+    if chars:
+      out.append((j, [dictionary[c] for c in chars], chars))
   return out
 
+# ━━━━━━ align ━━━━━━
 
 def align_lines(texts, audio, sr=SR):
   """Stamp every line against audio in one global pass.
   Returns (starts, ends, scores) keyed by line index, scores = mean token
-  log-prob. Empty dicts when the pass cannot run."""
+  log-prob. Empty dicts when the pass cannot run.
+  Also refreshes module-level `last_token_spans` with per-line
+  [(romaji char, start, end)] for karaoke fills."""
+  global last_token_spans
+  last_token_spans = {}
   model, dictionary, torch, dev = load_model()
   import torchaudio.functional as AF
   star = dictionary["<star>"]
@@ -101,8 +116,8 @@ def align_lines(texts, audio, sr=SR):
     return {}, {}, {}
   em, sec_per_frame = _emission(model, audio, torch, dev)
   seq, slices = [star], []
-  for j, ids in lines:
-    slices.append((j, len(seq), len(seq) + len(ids)))
+  for j, ids, chars in lines:
+    slices.append((j, len(seq), len(seq) + len(ids), chars))
     seq += ids + [star]
   if len(seq) > em.shape[1]:  # more tokens than frames: nothing alignable
     print(f"  ctc: {len(seq)} tokens over {em.shape[1]} frames, skipped")
@@ -114,12 +129,33 @@ def align_lines(texts, audio, sr=SR):
     print(f"  ctc: {len(spans)} spans for {len(seq)} tokens, skipped")
     return {}, {}, {}
   starts, ends, scores = {}, {}, {}
-  for j, a, b in slices:
+  for j, a, b, chars in slices:
     starts[j] = spans[a].start * sec_per_frame
     ends[j] = spans[b - 1].end * sec_per_frame
     scores[j] = statistics.mean(s.score for s in spans[a:b])
+    last_token_spans[j] = [(c, s.start * sec_per_frame, s.end * sec_per_frame)
+                           for c, s in zip(chars, spans[a:b])]
   return starts, ends, scores
 
+# ━━━━━━ confidence gate ━━━━━━
+
+def low_conf_cut(scores, pct=GATE_PCT):
+  """Score below which a cue is worth a second look, in mean-token-log-prob.
+
+  Two rules, whichever is higher:
+    absolute  exp(score) under CONF_FLOOR is a bad stamp in any mix, so a song
+              where everything is bad flags everything, not a tenth of it;
+    relative  the bottom pct% of this song, but only when the song is good
+              (median exp(score) over CONF_GOOD_MEDIAN) and at least 5 cues are
+              scored, so a clean align does not paint a tenth of itself amber.
+  None when nothing carries a score. `scores` is any iterable, None ignored."""
+  vals = sorted(s for s in scores if s is not None)
+  if not vals:
+    return None
+  cut = math.log(CONF_FLOOR)
+  if len(vals) >= 5 and statistics.median(vals) > math.log(CONF_GOOD_MEDIAN):
+    cut = max(cut, vals[min(len(vals) - 1, int(pct / 100.0 * len(vals)))])
+  return cut
 
 def gate(stamps, scores, pct=GATE_PCT):
   """Drop the lowest pct% of lines by confidence. One per-song percentile,

@@ -2,7 +2,6 @@
 Fixture: synthetic timed lines, replayed as ASR segments with jitter and misheard noise."""
 import random
 
-
 _LYRICS = [
   "morning light on the empty street",
   "i left my shoes beside the door",
@@ -44,7 +43,6 @@ _LYRICS = [
 # uneven but plausible line gaps, cycled across the lyric lines
 _GAPS = [4.2, 3.6, 5.1, 4.8, 3.9, 6.4, 4.0, 4.5]
 
-
 def _timed_lines(start=8.4):
   """Synthetic timed LRC lines: [(seconds, text)]."""
   lines = []
@@ -54,12 +52,10 @@ def _timed_lines(start=8.4):
     t += _GAPS[i % len(_GAPS)]
   return lines
 
-
 def _lrc_text(timed_lines):
   """Render timed lines as LRC source."""
   return "".join(f"[{int(t // 60):02d}:{t % 60:05.2f}]{text}\n"
                  for t, text in timed_lines)
-
 
 def garble_text(text, ratio=0.15):
   """Introduce misheard-text noise: swap ~ratio of chars to random ASCII."""
@@ -69,7 +65,6 @@ def garble_text(text, ratio=0.15):
     i = random.randint(0, len(chars) - 1)
     chars[i] = chr(random.randint(ord('a'), ord('z')))
   return "".join(chars)
-
 
 def synthesize_asr_segments(timed_lines, jitter_s=0.3):
   """Build fake ASR segments from timed lines with jitter and garbled text."""
@@ -85,7 +80,6 @@ def synthesize_asr_segments(timed_lines, jitter_s=0.3):
     end = max(start + 0.1, end)
     segments.append((start, end, garble_text(text)))
   return segments
-
 
 def test_coarse_alignment_lands_matched_lines_within_1s():
   """Starts land within 1s of LRC time for matched lines; cue starts non-decreasing."""
@@ -115,7 +109,6 @@ def test_coarse_alignment_lands_matched_lines_within_1s():
     assert cue_starts[i] >= cue_starts[i - 1], \
       f"non-decreasing violated at line {i}"
 
-
 def test_candidate_scoring_prefers_correct_lyrics():
   """Good candidate scores higher than garbage and clears 0.4."""
   from utasub.core.align import score_candidate
@@ -136,7 +129,6 @@ def test_candidate_scoring_prefers_correct_lyrics():
   assert good_score > bad_score, f"good ({good_score}) should beat bad ({bad_score})"
   assert good_score > 0.4, f"good score too low: {good_score}"
 
-
 # --- anchor-based warp ---
 
 def test_envelope_trim_floored_when_voice_lost_mid_phrase():
@@ -156,3 +148,30 @@ def test_envelope_trim_floored_when_voice_lost_mid_phrase():
   runs[3] = (starts[3], starts[3] + 4.0)
   cues = build_cues(starts, texts, runs, durations=durations)
   assert abs((cues[3].end - cues[3].start) - 4.0) < 0.6, "sound trim overridden"
+
+# --- shared song locale, empty-key guard ---
+
+def test_kanji_only_transcript_scores_as_japanese_not_pinyin():
+  """The transcript alone detects as zh, so its pinyin was compared against the
+  lyrics' romaji and a correct match landed under every threshold."""
+  from utasub.core.align import score_candidate
+  from utasub.core.providers import Candidate
+  cand = Candidate(title="T", album="", artist="A", source="test", duration_ms=0,
+                   lrc="[00:01.00] 歌詞は完全な漢字\n"
+                       "[00:05.00] 明日の空を見上げて\n"
+                       "[00:09.00] 今日の風が聞こえる")
+  segments = [(0.0, 4.0, "今日 明日 空 見上 完全 漢字"), (4.0, 8.0, "風 聞 歌詞")]
+  assert score_candidate(cand, segments, 0) > 0.3
+
+def test_a_romanizer_that_returns_nothing_scores_zero_not_one():
+  """Empty keys compare equal, so a missing romanizer tied every candidate at
+  1.0 and the pick fell to duration alone."""
+  from unittest.mock import patch
+  from utasub.core import align
+  from utasub.core.providers import Candidate
+  cand = Candidate(title="T", album="", artist="A", source="test",
+                   duration_ms=0, lrc="[00:01.00] 사랑해 그대여")
+  segments = [(0.0, 3.0, "사랑해 그대여")]
+  with patch.object(align, "romanize", lambda text, locale=None: ""):
+    assert align.score_candidate(cand, segments, 0) == 0.0
+    assert align.score_candidates([cand], segments, 0) == [(0.0, cand)]

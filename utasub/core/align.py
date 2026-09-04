@@ -11,17 +11,20 @@ import numpy as np
 
 from .romanize import detect, romanize
 
-
 SIMILARITY_THRESHOLD = 0.35
-
 
 @dataclass
 class Cue:
-  """Timed lyric line. confidence: 'fa', 'coarse', 'interpolated', 'lrc', or None."""
+  """Timed lyric line. confidence: 'fa', 'coarse', 'interpolated', 'lrc', or None.
+  score/token_spans are CTC evidence: real fields so `dataclasses.replace` at
+  every rebuild site (drag, split, merge, undo, region offset) carries them.
+  They stay out of __iter__/__len__, which keep the 3/4-tuple wire shape."""
   start: float
   end: float
   text: str
   confidence: Optional[str] = None
+  score: Optional[float] = None
+  token_spans: Optional[list] = None
 
   def __iter__(self):
     """Iterate as (start, end, text[, confidence]) tuple."""
@@ -47,26 +50,42 @@ def romaji_key(texts, locale=None):
     locale = detect(" ".join(texts))
   return [re.sub(r"[^0-9a-z]", "", romanize(t, locale=locale).lower()) for t in texts]
 
-
 # --- candidate scoring ---
 
-def score_candidate(candidate, segments, media_duration_ms=0, asr_key=None):
+def _empty_key(kind, text):
+  """Romanization dropped a whole non-empty text. Every key then compares equal
+  to every other one (SequenceMatcher('', '') is 1.0), so the caller must score
+  0, not 1. Loud: the cause is a missing romanizer, not this song."""
+  print(f"  ! {kind} romanization produced nothing for {len(text)} chars, "
+        f"scoring 0 (romakit[jp,zh,ko] installed?)")
+
+def score_candidate(candidate, segments, media_duration_ms=0, asr_key=None,
+                    locale=None):
   """Score a candidate by text similarity (romaji-space SequenceMatcher)
   and duration proximity. Returns float 0-1.
-  asr_key: precomputed romaji key for ASR text (avoids re-converting per candidate)."""
+  asr_key: precomputed romaji key for ASR text (avoids re-converting per candidate).
+  locale: romanizer for both sides, detected over lyric+ASR text when unset."""
   if not candidate.lrc:
     return 0.0
   lyric_text = " ".join(t for _, t in candidate.lines)
   if not lyric_text:
     return 0.0
 
+  asr_text = " ".join(t for _, _, t in segments)
+  if locale is None:
+    locale = detect(f"{lyric_text} {asr_text}")
   if asr_key is None:
-    asr_text = " ".join(t for _, _, t in segments)
     if not asr_text:
       return 0.0
-    asr_key = romaji_key([asr_text])[0]
+    asr_key = romaji_key([asr_text], locale=locale)[0]
+  if not asr_key:
+    _empty_key("ASR", asr_text)
+    return 0.0
 
-  lyr_key = romaji_key([lyric_text])[0]
+  lyr_key = romaji_key([lyric_text], locale=locale)[0]
+  if not lyr_key:
+    _empty_key("lyric", lyric_text)
+    return 0.0
   text_sim = difflib.SequenceMatcher(None, lyr_key, asr_key, autojunk=False).ratio()
 
   dur_sim = 1.0
@@ -76,32 +95,42 @@ def score_candidate(candidate, segments, media_duration_ms=0, asr_key=None):
 
   return text_sim * 0.8 + dur_sim * 0.2
 
-
-def score_candidates(candidates, segments, media_dur_ms):
+def score_candidates(candidates, segments, media_dur_ms, locale=None):
   """Score all candidates with LRC text against ASR segments.
-  Returns sorted [(score, candidate)] descending."""
+  Returns sorted [(score, candidate)] descending.
+  locale: detected once over the lyrics plus the transcript, then used for both
+  sides. Detected apart, a kanji-only transcript reads as zh and its pinyin is
+  compared against the lyrics' romaji."""
   asr_text = " ".join(t for _, _, t in segments)
-  asr_key = romaji_key([asr_text])[0] if asr_text else ""
+  lyric_text = " ".join(" ".join(t for _, t in c.lines)
+                        for c in candidates if c.lrc)
+  if locale is None:
+    locale = detect(f"{lyric_text} {asr_text}")
+  asr_key = romaji_key([asr_text], locale=locale)[0] if asr_text else ""
   scored = []
   for c in candidates:
     if not c.lrc:
       continue
-    s = score_candidate(c, segments, media_dur_ms, asr_key=asr_key)
+    s = score_candidate(c, segments, media_dur_ms, asr_key=asr_key,
+                        locale=locale)
     scored.append((s, c))
   scored.sort(key=lambda x: -x[0])
   return scored
 
-
 # --- coarse alignment ---
 
-def coarse_map(segments, texts):
+def coarse_map(segments, texts, locale=None):
   """Global char-level alignment of lyric text onto the ASR transcript in romaji space.
   Each ASR char gets a time interpolated inside its segment; SequenceMatcher blocks
   pin lyric chars to those times, unmatched stretches interpolate.
-  Returns (starts, matched) per line, or None when nothing matches."""
-  asr_chars, asr_times = _asr_char_stream(segments)
+  Returns (starts, matched) per line, or None when nothing matches.
+  locale: romanizer for both sides, from the lyrics when unset. The transcript
+  cannot decide it: kanji-only Japanese ASR text detects as zh."""
+  if locale is None:
+    locale = detect(" ".join(texts))
+  asr_chars, asr_times = _asr_char_stream(segments, locale)
 
-  keys = romaji_key(texts)
+  keys = romaji_key(texts, locale=locale)
   line_pos = [0]
   for k in keys:
     line_pos.append(line_pos[-1] + len(k))
@@ -132,13 +161,13 @@ def coarse_map(segments, texts):
              for j in range(len(texts))]
   return starts, matched
 
-
 # --- coarse helpers ---
 
-def _safe_romaji_key(texts):
+def _safe_romaji_key(texts, locale=None):
   """romaji_key per item, empty string on failure (e.g. Chinese chars cutlet chokes on).
   Locale detected once over the whole batch, not per item."""
-  locale = detect(" ".join(texts))
+  if locale is None:
+    locale = detect(" ".join(texts))
   out = []
   for t in texts:
     try:
@@ -147,19 +176,17 @@ def _safe_romaji_key(texts):
       out.append("")
   return out
 
-
-def _asr_char_stream(segments):
+def _asr_char_stream(segments, locale=None):
   """Timed ASR romaji char stream: each segment's romaji key expanded to per-char
   times interpolated inside the segment span. Returns (chars, times)."""
   chars = []
   times = []
-  seg_keys = _safe_romaji_key([t for _, _, t in segments])
+  seg_keys = _safe_romaji_key([t for _, _, t in segments], locale)
   for (s, e, _), k in zip(segments, seg_keys):
     for i, ch in enumerate(k):
       chars.append(ch)
       times.append(s + (e - s) * i / max(len(k) - 1, 1))
   return chars, times
-
 
 # --- vocal envelope ---
 
@@ -171,7 +198,6 @@ def frame_rms(audio, frame_s, sr=16000):
   if n == 0:
     return np.array([])
   return np.sqrt((audio[:n * frame].reshape(n, frame).astype(np.float64) ** 2).mean(axis=1))
-
 
 def voiced_envelope(audio, sr=16000, gate=0.02, local=False):
   """RMS-gated voiced/silent per 50ms frame. Low gate catches tails,
@@ -189,7 +215,6 @@ def voiced_envelope(audio, sr=16000, gate=0.02, local=False):
   ref = np.concatenate([ref, np.full(n - len(ref), ref[-1] if len(ref) else 0)])
   ref = np.maximum(ref, float(rms.max()) * 0.1)
   return rms > np.maximum(ref * gate, 1e-3)
-
 
 def voiced_runs(voiced, dip=0.45, min_run=0.2):
   """Voiced (onset, offset) times in seconds; gaps shorter than dip merged."""
@@ -209,7 +234,6 @@ def voiced_runs(voiced, dip=0.45, min_run=0.2):
     runs.append((start * 0.05, (last + 1) * 0.05))
   return [(s, e) for s, e in runs if e - s >= min_run]
 
-
 # --- envelope placement (--no-fa path) ---
 
 def walk_end(s, e0, runs):
@@ -223,14 +247,12 @@ def walk_end(s, e0, runs):
     cur_end = off
   return cur_end
 
-
 def split_outside(segments, start, end):
   """ASR segments fully outside the song span: (pre, post).
   pre ends at/before start, post begins at/after end."""
   pre = [seg for seg in segments if seg[1] <= start]
   post = [seg for seg in segments if seg[0] >= end]
   return pre, post
-
 
 CUE_GAP_S = 0.0  # gap left between a cue end and the next start (0 = seamless)
 UNVOICED_HOLD = 4.0   # cue length when the envelope finds no voice at the start
@@ -248,7 +270,6 @@ RATE_GUARD_SLACK = 3.0
 # it is wrong and a loose floor would undo it.
 RATE_FLOOR = 0.3
 
-
 def build_cues(starts, texts, runs, ends_hint=None, confidence=None,
                durations=None):
   """Cues from monotonic starts.
@@ -259,7 +280,7 @@ def build_cues(starts, texts, runs, ends_hint=None, confidence=None,
   confidence: optional list parallel to starts, stored in 4th cue element."""
   out = []
   # chars/sec from lines whose LRC interval is their real sung length (no break
-  # after). Sanity-checks break lines only.
+  # after). Checks break lines only.
   chars = [len(re.sub(r"[^0-9a-z぀-ヿ一-鿿]", "",
                       unicodedata.normalize("NFKC", t).lower())) for t in texts]
   rate = None
@@ -308,7 +329,6 @@ def build_cues(starts, texts, runs, ends_hint=None, confidence=None,
                    texts[j], conf))
   return out
 
-
 def place_by_envelope(starts, texts, voiced, runs, ends_hint=None, confidence=None):
   """Snap starts to vocal onsets, build cues. The --no-fa placement path."""
   if voiced is None:
@@ -330,7 +350,6 @@ def place_by_envelope(starts, texts, voiced, runs, ends_hint=None, confidence=No
     snapped.append(max(snapped[-1] + 0.05, s) if snapped else max(0.0, s))
   return build_cues(snapped, texts, runs or [], ends_hint=ends_hint, confidence=confidence)
 
-
 # --- audio loading ---
 
 def load_audio_16k(path):
@@ -343,7 +362,6 @@ def load_audio_16k(path):
                        creationflags=flags).stdout
   return np.frombuffer(raw, dtype=np.float32)
 
-
 def stem_cache_dir():
   """Vocal-stem cache, out of the media folder to keep it tidy.
   %LOCALAPPDATA%/utasub/stems (temp dir fallback)."""
@@ -354,7 +372,6 @@ def stem_cache_dir():
   d = Path(base) / "utasub" / "stems"
   d.mkdir(parents=True, exist_ok=True)
   return d
-
 
 def find_vocals(path):
   """Vocal stem file <name>.vocals.<ext>: beside the source first, then the
@@ -370,7 +387,6 @@ def find_vocals(path):
   cache = stem_cache_dir()
   return next((f for f in cache.iterdir()
                if f.is_file() and f.stem.lower() == want), None)
-
 
 # --- top-level align ---
 

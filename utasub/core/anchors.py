@@ -9,7 +9,6 @@ already discard outliers, so gating here would only thin the fit. Confidence
 gate lives where stamps are consumed directly (`place._adopt_fa`).
 """
 
-
 def collect(lrc_times, texts, audio):
   """(candidate anchor sets, stamp bundle) in window-local audio time.
   Candidates are [(anchors, diag)] with anchors = [(line_idx, audio_time)].

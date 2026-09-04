@@ -38,18 +38,15 @@ LAM_SLOPE = 3.0
 SLOPE_BREAK_TOL = 0.75   # seconds of discontinuity still counted as continuous
 SLOPE_BREAK_MIN = 0.03   # slope must move at least this much to be worth a break
 
-
 # --- envelope helpers ---
 
 def silence_gaps(runs, min_gap=2.0):
   """Unvoiced spans between voiced runs, long enough to hide inserted material."""
   return [(b, c) for (_, b), (c, _) in zip(runs, runs[1:]) if c - b >= min_gap]
 
-
 def voiced_near(runs, t, pre=ONSET_PRE):
   """True when t sits inside a voiced run, or just before one starts."""
   return any(on - pre <= t <= off for on, off in runs)
-
 
 # --- anchor filtering ---
 
@@ -73,11 +70,9 @@ def monotone_anchors(anchors):
   chain.reverse()
   return chain
 
-
 CHAIN_TOL = 1.5      # per-anchor stamp jitter a pair's slope must tolerate
 CHAIN_MIN_FRAC = 0.5  # below this the anchors are not one line and are kept as-is
 CHAIN_SPLIT_FRAC = 0.8  # two chains covering this much of the set are a real seam
-
 
 def linear_anchors(anchors, lrc_times, lo=None, hi=None, tol=CHAIN_TOL):
   """Longest chain whose every step implies a tempo a take could actually run.
@@ -136,21 +131,8 @@ def linear_anchors(anchors, lrc_times, lo=None, hi=None, tol=CHAIN_TOL):
     return list(anchors)
   return [anchors[i] for i in keep]
 
-
-def cluster_offset(deltas, bin_s=2.0):
-  """Densest-cluster offset. Median breaks once over half the anchors are
-  wrong-occurrence matches (a bad seed); the mode does not."""
-  if not deltas:
-    return None
-  buckets = {}
-  for d in deltas:
-    buckets.setdefault(int(d // bin_s), []).append(d)
-  best = max(buckets, key=lambda k: len(buckets[k]) + 0.5 * len(buckets.get(k + 1, ())))
-  return median(buckets[best] + buckets.get(best + 1, []))
-
-
 def _theil_sen(xs, ys, min_dx=10.0):
-  """Robust (slope, offset) from pairwise slopes. Median tolerates up to half
+  """(slope, offset) from pairwise slopes. Median tolerates up to half
   the anchors being wrong; least squares does not."""
   slopes = [(ys[b] - ys[a]) / (xs[b] - xs[a])
             for a in range(len(xs)) for b in range(a + 1, len(xs))
@@ -160,16 +142,15 @@ def _theil_sen(xs, ys, min_dx=10.0):
   sl = median(slopes)
   return sl, median(y - sl * x for x, y in zip(xs, ys))
 
-
-def _fit_line(anchors, lrc_times, a, b, free_slope):
+def _fit_line(anchors, lrc_times, a, b):
   """(slope, offset, cost, measured) for anchors[a:b]. Slope is locked to 1
   unless the segment is long and well-populated enough to measure a tempo
-  difference; measured says whether it was, which gates tempo-change seams."""
+  difference; measured says whether it was, which gates tempo-change points."""
   xs = [lrc_times[j] for j, _ in anchors[a:b]]
   ys = [t for _, t in anchors[a:b]]
   span = xs[-1] - xs[0]
   fit = None
-  if free_slope and len(xs) >= SLOPE_MIN_ANCHORS and span >= SLOPE_MIN_SPAN:
+  if len(xs) >= SLOPE_MIN_ANCHORS and span >= SLOPE_MIN_SPAN:
     fit = _theil_sen(xs, ys)
     if fit is not None and not (SLOPE_LO <= fit[0] <= SLOPE_HI):
       fit = None
@@ -179,32 +160,29 @@ def _fit_line(anchors, lrc_times, a, b, free_slope):
   sl, off = fit
   return sl, off, sum(abs(y - (sl * x + off)) for x, y in zip(xs, ys)), measured
 
-
 def _at(seg, t):
   """Audio time of an LRC time under one segment (slope, offset)."""
   return seg[0] * t + seg[1]
 
-
-def _segment_fit(anchors, lrc_times, gaps, lam, min_seg, min_jump, neg_mult,
-                 free_slope=True):
+def _segment_fit(anchors, lrc_times, gaps):
   """Changepoint DP over anchor index. Returns [(a, b, slope, offset)]."""
   n = len(anchors)
-  if n < min_seg * 2:
-    sl, off, _, _ = _fit_line(anchors, lrc_times, 0, n, free_slope)
+  if n < MIN_SEG * 2:
+    sl, off, _, _ = _fit_line(anchors, lrc_times, 0, n)
     return [(0, n, sl, off)]
 
   cost = {}
   for a in range(n):
-    for b in range(a + min_seg, n + 1):
+    for b in range(a + MIN_SEG, n + 1):
       if lrc_times[anchors[b - 1][0]] - lrc_times[anchors[a][0]] < MIN_SEG_SPAN:
         continue
-      sl, off, c, ms = _fit_line(anchors, lrc_times, a, b, free_slope)
+      sl, off, c, ms = _fit_line(anchors, lrc_times, a, b)
       cost[(a, b)] = (c, sl, off, ms)
 
   # D[(a, b)] = best total cost for anchors[:b] whose last segment is [a, b)
   D, back = {}, {}
-  for b in range(min_seg, n + 1):
-    for a in range(0, b - min_seg + 1):
+  for b in range(MIN_SEG, n + 1):
+    for a in range(0, b - MIN_SEG + 1):
       if (a, b) not in cost:
         continue
       c, sl, off, ms = cost[(a, b)]
@@ -213,7 +191,7 @@ def _segment_fit(anchors, lrc_times, gaps, lam, min_seg, min_jump, neg_mult,
         continue
       best, bk = None, None
       seam = lrc_times[anchors[a][0]]
-      for a2 in range(0, a - min_seg + 1):
+      for a2 in range(0, a - MIN_SEG + 1):
         if (a2, a) not in D or (a2, a) not in cost:
           continue
         _, sl2, off2, ms2 = cost[(a2, a)]
@@ -227,7 +205,7 @@ def _segment_fit(anchors, lrc_times, gaps, lam, min_seg, min_jump, neg_mult,
             continue
           pen = LAM_SLOPE
         else:
-          if abs(jump) < min_jump:
+          if abs(jump) < MIN_JUMP:
             continue
           # a cut may not swallow more than the LRC interval it lands on
           if jump < 0 and -jump >= seam - lrc_times[anchors[a - 1][0]]:
@@ -235,7 +213,7 @@ def _segment_fit(anchors, lrc_times, gaps, lam, min_seg, min_jump, neg_mult,
           if not _jump_credible(gaps, _at((sl2, off2), lrc_times[anchors[a - 1][0]]),
                                 _at((sl, off), seam), jump):
             continue
-          pen = lam * (neg_mult if jump < 0 else 1.0)
+          pen = LAM * (NEG_MULT if jump < 0 else 1.0)
         tot = D[(a2, a)] + c + pen
         if best is None or tot < best:
           best, bk = tot, (a2, a)
@@ -244,7 +222,7 @@ def _segment_fit(anchors, lrc_times, gaps, lam, min_seg, min_jump, neg_mult,
 
   ends = [(v, k) for k, v in D.items() if k[1] == n]
   if not ends:
-    sl, off, _, _ = _fit_line(anchors, lrc_times, 0, n, free_slope)
+    sl, off, _, _ = _fit_line(anchors, lrc_times, 0, n)
     return [(0, n, sl, off)]
   key = min(ends)[1]
   segs = []
@@ -256,39 +234,36 @@ def _segment_fit(anchors, lrc_times, gaps, lam, min_seg, min_jump, neg_mult,
   segs.reverse()
   return segs
 
-
 def _jump_credible(gaps, t_prev, t_next, jump):
   """A jump is only real when unvoiced audio at the seam can account for it."""
   lo, hi = min(t_prev, t_next) - 5.0, max(t_prev, t_next) + 5.0
   return any(g1 > lo and g0 < hi and (g1 - g0) >= 0.6 * abs(jump)
              for g0, g1 in gaps)
 
-
-def fit_warp(anchors, lrc_times, runs, lam=LAM, min_seg=MIN_SEG,
-             min_jump=MIN_JUMP, neg_mult=NEG_MULT, free_slope=True):
+def fit_warp(anchors, lrc_times, runs):
   """Fit the warp to [(line_idx, audio_time)] anchors.
   Returns (segments, diag) with segments = [(first_line_idx, slope, offset)]
   ascending, or None when there are too few anchors to fit anything.
   Each segment carries its own slope, so a take running a whole section slower
   than the studio cut is expressible without changepoints."""
+  raw = len(anchors)
   anchors = linear_anchors(monotone_anchors(sorted(anchors)), lrc_times)
   if len(anchors) < 3:
     return None
   gaps = silence_gaps(runs)
 
   head = 0
-  args = (gaps, lam, min_seg, min_jump, neg_mult, free_slope)
-  segs = _segment_fit(anchors, lrc_times, *args)
+  segs = _segment_fit(anchors, lrc_times, gaps)
   # head guard: a first segment placing line 0 in silence fitted on bad
   # anchors (wrong-occurrence matches in pre-song audio). Drop and refit.
   for _ in range(4 if runs else 0):
     if voiced_near(runs, _at(segs[0][2:], lrc_times[0])):
       break
     nxt = head + segs[0][1]
-    if len(anchors) - nxt < min_seg * 2:
+    if len(anchors) - nxt < MIN_SEG * 2:
       break
     head = nxt
-    segs = _segment_fit(anchors[head:], lrc_times, *args)
+    segs = _segment_fit(anchors[head:], lrc_times, gaps)
   kept = anchors[head:]
   # no snap-to-nearest-onset rescue here: the envelope can't tell singing from
   # crowd noise or an intro riff, so snapping a badly-fitted head onto the
@@ -302,13 +277,13 @@ def fit_warp(anchors, lrc_times, runs, lam=LAM, min_seg=MIN_SEG,
   for k in range(1, len(out)):
     seam = lrc_times[out[k][0]]
     jumps.append(round(_at(out[k][1:], seam) - _at(out[k - 1][1:], seam), 2))
-  diag = {"anchors": len(kept), "dropped": len(anchors) - len(kept),
+  # counted against the stamps handed in, so chain/monotone drops show too
+  diag = {"anchors": len(kept), "dropped": raw - len(kept),
           "segments": len(out), "resid": round(resid, 3),
           "slopes": [round(sl, 4) for _, sl, _ in out],
           "head_ok": bool(runs) and voiced_near(runs, _at(out[0][1:], lrc_times[0])),
           "jumps": jumps}
   return out, diag
-
 
 def _seg_at(segments, j):
   """Segment owning line index j."""
@@ -317,12 +292,10 @@ def _seg_at(segments, j):
     k += 1
   return segments[k]
 
-
 def apply_warp(lrc_times, segments):
   """Warp LRC times to audio times. Monotone by construction: slopes stay
   positive and a cut can never exceed the LRC interval it lands on."""
   return [_at(_seg_at(segments, j)[1:], t) for j, t in enumerate(lrc_times)]
-
 
 def warped_durations(lrc_times, segments):
   """Per-line sung duration under the warp: LRC interval scaled by that
@@ -336,7 +309,6 @@ def warped_durations(lrc_times, segments):
     else:
       out.append(sl * 6.0)
   return out
-
 
 def span_ok(placed, lrc_times, slack=60.0):
   """Reject a runaway fit that stretches the song far past its LRC length."""

@@ -11,7 +11,6 @@ _available = None
 # aligner takes whisper-style language names; '' (latin) -> English
 _FA_LANG = {"ja": "Japanese", "zh": "Chinese", "ko": "Korean"}
 
-
 def fa_available():
   """True when qwen_asr is importable."""
   global _available
@@ -22,7 +21,6 @@ def fa_available():
     except ImportError:
       _available = False
   return _available
-
 
 def load_aligner():
   """Lazy Qwen3-ForcedAligner (0.6B), cuda bfloat16 when available."""
@@ -44,12 +42,10 @@ def load_aligner():
       "Qwen/Qwen3-ForcedAligner-0.6B", dtype=dtype, device_map=device))
   return _aligner_cache[0]
 
-
 def _norm_key(t):
   """Lowercase NFKC, keep digits+ascii+kana+kanji only."""
   return re.sub(r"[^0-9a-z぀-ヿ一-鿿]", "",
                 unicodedata.normalize("NFKC", t).lower())
-
 
 def _split_sections(starts, gap=4.0, max_span=150.0):
   """Group line indices into sections split at start gaps > gap or span > max_span."""
@@ -62,7 +58,6 @@ def _split_sections(starts, gap=4.0, max_span=150.0):
     cur.append(j)
   secs.append(cur)
   return secs
-
 
 def force_align_lines(starts, texts, audio, sr=16000, pre_pad=5.0, post_pad=10.0,
                       drift_gate=8.0):
