@@ -2,8 +2,9 @@
 candidates, per-region choices, toggles, regions, manual timings.
 Deterministic re-export."""
 import json
+import os
 import re
-from dataclasses import asdict, fields as dataclass_fields
+from dataclasses import asdict, fields as dataclass_fields, replace
 from statistics import median
 from pathlib import Path
 
@@ -12,11 +13,9 @@ from .providers import Candidate
 
 SCHEMA_VERSION = 1
 
-
 def session_path(media_path):
   """<name>.utasub.json next to media file."""
   return Path(media_path).with_suffix(".utasub.json")
-
 
 # --- manual edits ---
 # A re-align rebuilds every cue from scratch, so an edit must find its line
@@ -25,25 +24,40 @@ def session_path(media_path):
 # it was made at, re-attaching to the nearest same-text cue. Wrong only when
 # repeated text moves further than the gap to its neighbouring repeat.
 
+EDIT_KINDS = ("timings", "deleted", "added", "texts")
+
+def empty_edits():
+  """Manual-edit record with every kind present and empty."""
+  return {k: [] for k in EDIT_KINDS}
+
 def edit_key(text):
   """Normalized cue text, the stable half of an edit's identity."""
   return re.sub(r"\s+", " ", (text or "").strip().lower())
-
 
 def _edit_record(cue, start=None, end=None):
   return {"text": edit_key(cue[2]), "at": round(cue[0], 3),
           "start": round(cue[0] if start is None else start, 3),
           "end": round(cue[1] if end is None else end, 3)}
 
+ADD_NEAR_S = 2.0   # an added record this close to a same-text cue is that cue
+
+def _already_placed(rec, cues, by_text):
+  """True when this placement produced the added record's line near where the
+  record was made."""
+  at = rec.get("at")
+  hits = by_text.get(rec.get("text", ""), [])
+  return any(at is None or abs(cues[i][0] - at) <= ADD_NEAR_S for i in hits)
 
 def apply_manual_edits(cues, edits):
-  """Re-apply manual timings and deletions to a freshly built cue list.
-  Unmatched edits stay in the record: a cue missing from this pass isn't
+  """Re-apply manual timings, deletions and insertions to a freshly built cue
+  list. Unmatched edits stay in the record: a cue missing from this pass isn't
   evidence the edit is stale, a later align may still find its line.
   Returns a new list."""
   timings = (edits or {}).get("timings") or []
   deleted = (edits or {}).get("deleted") or []
-  if not timings and not deleted:
+  added = (edits or {}).get("added") or []
+  texts = (edits or {}).get("texts") or []
+  if not timings and not deleted and not added and not texts:
     return list(cues)
 
   by_text = {}
@@ -66,17 +80,41 @@ def apply_manual_edits(cues, edits):
     i = claim(rec)               # gone regardless of timing
     if i is not None:
       drop.add(i)
+  # a retyped line claims on the text the aligner produced, so it runs before
+  # the timings, which are keyed on the text the user typed
+  for rec in texts:
+    i = claim(rec)
+    if i is None:
+      continue
+    c = out[i]
+    start = rec.get("start", c[0])
+    end = rec.get("end", c[1])
+    if isinstance(c, Cue):
+      out[i] = replace(c, start=start, end=end, text=rec["text_to"])
+    else:
+      out[i] = (start, end, rec["text_to"]) + tuple(c[3:])
   for rec in timings:
     i = claim(rec)
     if i is None:
       continue
     c = out[i]
     if isinstance(c, Cue):
-      out[i] = Cue(rec["start"], rec["end"], c.text, c.confidence)
+      out[i] = replace(c, start=rec["start"], end=rec["end"])
     else:
       out[i] = (rec["start"], rec["end"]) + tuple(c[2:])
-  return [c for i, c in enumerate(out) if i not in drop]
+  kept = [c for i, c in enumerate(out) if i not in drop]
 
+  # a hand-inserted line (live-only chorus, unsung verse) has no LRC source, so
+  # the aligner cannot rebuild it: replay it verbatim. A record this placement
+  # does produce, at about the time it was recorded, was a text edit rather than
+  # an insert and is left alone; an inserted repeat of a chorus line elsewhere in
+  # the song is not that, so it still replays.
+  new = [Cue(rec["start"], rec["end"], rec.get("text_raw") or rec.get("text", ""),
+             "manual")
+         for rec in added if not _already_placed(rec, cues, by_text)]
+  if new:
+    kept = sorted(kept + new, key=lambda c: c[0])
+  return kept
 
 def _migrate_manual_timings(data):
   """Convert position-keyed manual timings from an old session to text-keyed.
@@ -95,7 +133,7 @@ def _migrate_manual_timings(data):
     if isinstance(v, (list, tuple)) and len(v) >= 2:
       pairs.append((i, float(v[0]), float(v[1])))
   if not pairs:
-    return {"timings": [], "deleted": []}
+    return empty_edits()
 
   def score(seq):
     d = [abs(s - seq[i][0]) for i, s, _ in pairs if 0 <= i < len(seq)]
@@ -104,21 +142,41 @@ def _migrate_manual_timings(data):
   seq = min((cues, lyric), key=score)
   out = [{"text": edit_key(seq[i][2]), "at": s, "start": s, "end": e}
          for i, s, e in pairs if 0 <= i < len(seq)]
-  return {"timings": out, "deleted": []}
-
+  return {**empty_edits(), "timings": out}
 
 def _cand_dict(c):
-  """Candidate → plain dict, dropping the cached parse."""
+  """Candidate → plain dict, dropping the cached parse. user_picked is set on
+  the instance (lyrickit's Candidate does not declare it) and decides the
+  low-confidence guard, so it has to survive the round trip."""
   d = asdict(c)
   d.pop("_parsed_lines", None)
+  d["user_picked"] = bool(getattr(c, "user_picked", False))
   return d
-
 
 def _cand_from(d):
   """Plain dict → Candidate, ignoring keys Candidate does not declare."""
   fields = {f.name for f in dataclass_fields(Candidate)}
-  return Candidate(**{k: v for k, v in d.items() if k in fields})
+  cand = Candidate(**{k: v for k, v in d.items() if k in fields})
+  cand.user_picked = bool(d.get("user_picked", False))
+  return cand
 
+# --- per-cue extras ---
+# Numeric CTC score and karaoke token spans ride on the Cue instance rather
+# than the dataclass: Cue.confidence is a source label ('lrc', 'fa', 'mc') that
+# the placement chain and the exporter both branch on, and widening the tuple
+# would change every cue's serialized length. Stored as a parallel list.
+
+CUE_EXTRAS = ("score", "token_spans")
+
+def _cue_extras(cue):
+  d = {k: getattr(cue, k, None) for k in CUE_EXTRAS}
+  return {k: v for k, v in d.items() if v is not None}
+
+def _apply_extras(cue, extras):
+  for k, v in (extras or {}).items():
+    if k in CUE_EXTRAS:
+      setattr(cue, k, v)
+  return cue
 
 def _read_raw(media_path):
   """Parsed session file dict, or None when the file is missing."""
@@ -127,12 +185,18 @@ def _read_raw(media_path):
     return None
   return json.loads(path.read_text(encoding="utf-8"))
 
-
 def _write_raw(media_path, data):
+  """Atomic: the file holds the only copy of the cached ASR block and every
+  manual edit, so a crash mid-write must not truncate it."""
   path = session_path(media_path)
-  path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+  # pid in the tmp name: two processes writing one session must not share it
+  tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+  try:
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+  finally:
+    tmp.unlink(missing_ok=True)  # a failed replace must not leave the tmp behind
   return path
-
 
 # --- ASR block (written by asr_gen, read by core.asr.load_asr) ---
 
@@ -141,7 +205,7 @@ def save_asr(media_path, language, segments):
   segments = [(start, end, text), ...]. Returns the session path."""
   data = _read_raw(media_path) or {
     "schema_version": SCHEMA_VERSION,
-    "media": str(Path(media_path).resolve()),
+    "media": Path(media_path).name,
   }
   data["asr"] = {
     "language": language,
@@ -149,48 +213,52 @@ def save_asr(media_path, language, segments):
   }
   return _write_raw(media_path, data)
 
-
 def has_asr(media_path):
   """True when the file carries a cached ASR block."""
   data = _read_raw(media_path)
   return bool(data and data.get("asr"))
-
 
 def has_session(media_path):
   """True when saved editing state (cues) exists, not just an ASR block."""
   data = _read_raw(media_path)
   return bool(data and "cues" in data)
 
-
 def save(media_path, *, candidates=None, chosen_index=None, cues=None,
          song_span=None, romaji=True, credit_toggles=None,
          regions=None, placement=None, region_metas=None,
          offset=None, lead=None, region_choices=None, manual_edits=None,
-         mc_spans=None):
+         mc_spans=None, ass_style=None, translation=None):
   """Write session file. candidates = list of Candidate dataclass.
   region_metas: per-region strategy dicts from multi-song finalize.
   region_choices: {region_idx: (score, Candidate)} picked per region, so
   reopen restores picker assignments without re-searching.
   mc_spans: [(start, end), ...] detected spoken intermissions, stored so
   re-export keeps the MC track without re-classifying.
-  offset/lead: SRT write-time timing, stored so re-export reproduces the SRT."""
-  from .export import SRT_OFFSET_S, SRT_LEAD_S
+  offset/lead: SRT write-time timing, stored so re-export reproduces the SRT.
+  ass_style: .ass style knobs, stored so re-export reproduces the header.
+  translation: third .ass line from the candidate's tlyric."""
+  from . import export as export_mod
+  SRT_OFFSET_S, SRT_LEAD_S = export_mod.SRT_OFFSET_S, export_mod.SRT_LEAD_S
+  cue_meta = [_cue_extras(c) for c in (cues or [])]  # positional, one per cue
   data = {
     "schema_version": SCHEMA_VERSION,
-    "media": str(Path(media_path).resolve()),
+    "media": Path(media_path).name,
     "chosen_index": chosen_index,
     "candidates": [_cand_dict(c) for c in (candidates or [])],
     "cues": [list(c) if isinstance(c, (tuple, Cue)) else c for c in (cues or [])],
+    "cue_meta": cue_meta if any(cue_meta) else [],
     "song_span": list(song_span) if song_span else None,
     "romaji": romaji,
     "credit_toggles": credit_toggles or {},
     "regions": regions or [],
-    "manual_edits": manual_edits or {"timings": [], "deleted": []},
+    "manual_edits": manual_edits or empty_edits(),
     "placement": placement or {},
     "region_metas": region_metas or [],
     "mc_spans": [[round(a, 3), round(b, 3)] for a, b in (mc_spans or [])],
     "offset": SRT_OFFSET_S if offset is None else offset,
     "lead": SRT_LEAD_S if lead is None else lead,
+    "ass_style": dict(export_mod.ASS_STYLE) if ass_style is None else dict(ass_style),
+    "translation": bool(export_mod.ASS_TRANSLATION if translation is None else translation),
     "region_choices": [
       {"region_idx": idx, "score": score, "candidate": _cand_dict(cand)}
       for idx, (score, cand) in sorted((region_choices or {}).items())
@@ -202,13 +270,19 @@ def save(media_path, *, candidates=None, chosen_index=None, cues=None,
     data["asr"] = existing["asr"]
   return _write_raw(media_path, data)
 
-
 def load(media_path):
   """Load session file. Returns dict or None if missing."""
   path = session_path(media_path)
   if not path.exists():
     return None
   data = json.loads(path.read_text(encoding="utf-8"))
+  # media is stored as a basename, so an archive move keeps the session; a
+  # rename still loads (the ASR block and the manual edits are the expensive
+  # part) and only says so. Compared whole: song.mkv and song.flac in one folder
+  # map to the same session file, and the extension is the only thing that says so
+  stored = data.get("media") or ""
+  if stored and stored != Path(media_path).name:
+    print(f"  session: written for {stored}, loading onto {Path(media_path).name}")
   data["candidates"] = [_cand_from(c) for c in data.get("candidates", [])]
   data["region_choices"] = {
     ch["region_idx"]: (ch.get("score", 0.0), _cand_from(ch["candidate"]))
@@ -216,9 +290,11 @@ def load(media_path):
   }
   # cues: reconstruct Cue for song lines, keep tuples for ASR segments
   raw_cues = []
-  for c in data.get("cues", []):
+  cue_meta = data.get("cue_meta") or []
+  for i, c in enumerate(data.get("cues", [])):
     if len(c) == 4 and isinstance(c[3], str):
-      raw_cues.append(Cue(c[0], c[1], c[2], c[3]))
+      extras = cue_meta[i] if i < len(cue_meta) else None
+      raw_cues.append(_apply_extras(Cue(c[0], c[1], c[2], c[3]), extras))
     else:
       raw_cues.append(tuple(c))
   data["cues"] = raw_cues
@@ -229,17 +305,38 @@ def load(media_path):
   edits = data.get("manual_edits")
   if not (edits or {}).get("timings") and data.get("manual_timings"):
     edits = _migrate_manual_timings(data)
-  data["manual_edits"] = edits or {"timings": [], "deleted": []}
+  edits = dict(edits or {})
+  for k in EDIT_KINDS:
+    edits.setdefault(k, [])
+  data["manual_edits"] = edits
   return data
-
 
 def reexport(media_path, session_data):
   """Deterministic re-export from session data. No network, no re-align.
   Multi-region sessions export from pre-merged cues (stored time-ordered).
   Returns list of written paths."""
-  from .export import export_srt
+  from .export import export_ass, export_srt
   cues = session_data["cues"]
   romaji = session_data.get("romaji", True)
-  return export_srt(media_path, cues, romaji=romaji,
-                    offset=session_data.get("offset"),
-                    lead=session_data.get("lead"))
+  offset, lead = session_data.get("offset"), session_data.get("lead")
+  written = export_srt(media_path, cues, romaji=romaji, offset=offset, lead=lead)
+  written.append(export_ass(media_path, cues, offset=offset, lead=lead,
+                            style=session_data.get("ass_style"),
+                            translations=_translations(session_data)))
+  return written
+
+def _translations(session_data):
+  """Merged {original: translated} over every candidate this session chose, or
+  {} when --translation was off. Merging is safe: the maps key on lyric text, so
+  a per-region candidate only adds the lines of its own song."""
+  if not session_data.get("translation"):
+    return {}
+  from .providers import translation_lines
+  chosen = [c for _, c in (session_data.get("region_choices") or {}).values()]
+  idx, cands = session_data.get("chosen_index"), session_data.get("candidates") or []
+  if isinstance(idx, int) and 0 <= idx < len(cands):
+    chosen.append(cands[idx])
+  out = {}
+  for cand in chosen:
+    out.update(translation_lines(cand))
+  return out
