@@ -3,7 +3,15 @@
 Adds what romakit has no opinion on: user/song-level locale pin, and a
 warning when a romakit language extra is missing from the environment.
 """
+import unicodedata
+
 from romakit import LANGS, detect, is_cjk, norm_lang, romanize as _rk_romanize
+
+def nfkc(text):
+  """Fold compatibility characters to their plain forms: the ﬁ/ﬂ ligatures a
+  lyric source may carry become fi/fl, full-width latin folds to ascii, so the
+  MMS dictionary times them and karaoke does not orphan the leading glyph."""
+  return unicodedata.normalize("NFKC", text) if text else text
 
 _DEP_HINT = {"zh": "pypinyin not installed, no Chinese romanization",
              "ko": "korean-romanizer not installed, no Korean romanization"}
@@ -58,13 +66,28 @@ def romanize(text, locale=None):
   if _lang_override:
     loc, guessed = _lang_override, False
   if loc not in ("zh", "ko"):
-    return _rk_romanize(text, lang="jp")
+    return nfkc(_rk_romanize(text, lang="jp"))
   rom = _romanize_lang(text, loc)
   # safety net only when nothing pinned locale: han-only Japanese lyrics
   # detect as zh, fall back to kanji path if pypinyin absent
   if not rom and loc == "zh" and guessed:
-    return _rk_romanize(text, lang="jp")
-  return rom
+    return nfkc(_rk_romanize(text, lang="jp"))
+  return nfkc(rom)
+
+def mora_units(text):
+  """Japanese romaji split into karaoke units, one per kana mora (foreign words
+  whole). () when text has no Japanese. Chinese/Korean need no split, their
+  romaji is already one syllable per token."""
+  from romakit import mora
+  return mora(nfkc(text))
+
+def cjk_pairs(text, locale=None):
+  """[(glyph/word surface, romaji)] for per-unit karaoke on the original line:
+  a word for Japanese, a glyph for Chinese/Korean. () for non-CJK. Locale
+  resolves as romanize() does (override > arg > default)."""
+  from romakit import pairs as _pairs
+  loc = _lang_override or (locale if locale is not None else _default_locale)
+  return _pairs(nfkc(text), lang=loc or "auto")
 
 def romanize_suffix(text):
   """' (Romaji)' suffix if text is CJK, else empty string."""

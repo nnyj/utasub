@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .align import Cue
-from .romanize import detect, is_cjk, romanize
+from .romanize import cjk_pairs, detect, is_cjk, mora_units, nfkc, romanize
 
 # Export-time timing knobs. Both apply at write time only, so sessions and the
 # timeline stay onset-true and either can change without re-aligning.
@@ -136,11 +136,13 @@ def export_srt(media_path, segments, romaji=True, offset=None, lead=None):
 ASS_FONT = "Arial"
 ASS_FONT_SIZE = 72
 ASS_DIM_SCALE = 0.72       # original-line size vs romaji, 0..1
-ASS_DIM_ALPHA = "80"       # original-line transparency, ASS hex 00=opaque..FF=clear
+ASS_DIM_ALPHA = "80"       # original-line fill transparency, ASS hex 00=opaque..FF=clear
+ASS_DIM_BORDER_BOOST = 1   # extra outline px on the dim line, keeps it legible on busy video
 ASS_FADE_MS = (120, 120)   # (fade-in, fade-out) per cue, ms
 ASS_OUTLINE = 3
 ASS_SHADOW = 1
 ASS_MARGIN_V = 54          # gap from the bottom edge, PlayRes px
+ASS_STACK_GAP = 6          # gap between stacked karaoke lines, PlayRes px
 ASS_PLAY_RES = (1920, 1080)
 ASS_MC_SCALE = 0.6         # MC (spoken) line size vs lyric lines
 ASS_MC_COLOUR = "&H00B4B4B4"   # grey: patter reads as secondary to the song
@@ -168,10 +170,27 @@ def ass_timestamp(seconds):
   s, cs = divmod(cs, 100)
   return f"{h:d}:{m:02}:{s:02}.{cs:02}"
 
+def _group_runs(runs):
+  """Merge per-char runs into whitespace words, keeping each word's first start.
+  The space that ends a word rides its last run, so `" " in run text` marks a
+  boundary. Japanese lines do not come through here; their mora come pre-split
+  from the romanizer (romanize.mora_units)."""
+  groups, cur = [], None
+  for i, (start, text) in enumerate(runs):
+    if cur is not None and " " not in runs[i - 1][1]:
+      cur[1] += text
+    else:
+      if cur is not None:
+        groups.append(cur)
+      cur = [start, text]
+  if cur is not None:
+    groups.append(cur)
+  return groups
+
 def _kf_line(rom, spans, cue_len):
-  r"""Romaji line as {\kf} runs from CTC token spans, or None when the spans do
-  not line up with this romaji (a different locale pinned at export, or a hand
-  text edit since the align).
+  r"""Romaji line as {\k} runs from CTC token spans, one per whitespace word, or
+  None when the spans do not line up with this romaji (a different locale pinned
+  at export, or a hand text edit since the align).
 
   Matching is by character, not by count: the aligner drops whitespace and any
   char outside the MMS dictionary, so spans are a subsequence of `rom` and the
@@ -190,15 +209,40 @@ def _kf_line(rom, spans, cue_len):
       pending += ch
   if k != len(spans) or not runs:
     return None
-  # each run holds the screen until the next one starts, so the inter-token gaps
+  units = _group_runs(runs)
+  # each unit holds the screen until the next one starts, so the inter-unit gaps
   # of a held note are swept too. Boundaries round to whole centiseconds and the
   # durations are their differences, so the runs tile the cue exactly instead of
   # drifting a rounding step per run. Clamped into the cue: the envelope can trim
   # an end back inside the spans, an un-clamped tail overruns the line it paints.
-  cs = [round(min(cue_len, max(0.0, r[0])) * 100) for r in runs] + [round(cue_len * 100)]
-  out = f"{{\\kf{cs[0]}}}" if cs[0] else ""
-  for i, (_start, text) in enumerate(runs):
-    out += f"{{\\kf{max(0, cs[i + 1] - cs[i])}}}{text}"
+  cs = [round(min(cue_len, max(0.0, w[0])) * 100) for w in units] + [round(cue_len * 100)]
+  out = f"{{\\k{cs[0]}}}" if cs[0] else ""
+  for i, (_start, text) in enumerate(units):
+    out += f"{{\\k{max(0, cs[i + 1] - cs[i])}}}{text}"
+  return out
+
+def _kanji_kf(pairs, spans, cue_len):
+  r"""Original-line karaoke: each unit from `pairs` (a Japanese word, a Chinese
+  or Korean glyph) gets a {\k} run, its start read off the romaji span that
+  times the unit's first letter. Untimed units (punctuation) inherit the run
+  before them. None when there is nothing to time against."""
+  if not pairs or not spans:
+    return None
+  k, units, last = 0, [], 0.0
+  for surface, rom in pairs:
+    start = None
+    for c in rom.lower():
+      if c.isalpha() and k < len(spans) and spans[k][0] == c:
+        if start is None:
+          start = spans[k][1]
+        k += 1
+    start = last if start is None else start
+    last = start
+    units.append((start, surface))
+  cs = [round(min(cue_len, max(0.0, s)) * 100) for s, _ in units] + [round(cue_len * 100)]
+  out = f"{{\\k{cs[0]}}}" if cs[0] else ""
+  for i, (_s, surface) in enumerate(units):
+    out += f"{{\\k{max(0, cs[i + 1] - cs[i])}}}{surface}"
   return out
 
 def ass_style(style=None):
@@ -257,7 +301,7 @@ def export_ass(media_path, cues, *, offset=None, lead=None, style=None,
   fade = f"{{\\fad({fade_in},{fade_out})}}" if (fade_in or fade_out) else ""
   body = []
   for seg, locale in zip(cues, locales):
-    start, end, text = seg[0], seg[1], seg[2]
+    start, end, text = seg[0], seg[1], nfkc(seg[2])
     if not text:
       continue
     style = "Default"
@@ -273,12 +317,54 @@ def export_ass(media_path, cues, *, offset=None, lead=None, style=None,
       dual = bool(rom and rom != text)
       sung = rom if dual else text
       spans = getattr(seg, "token_spans", None)
-      sung = (_kf_line(sung, spans, end - start) if spans else None) or sung
-      text = (f"{sung}\\N{{\\fs{dim_size}\\alpha&H{ASS_DIM_ALPHA}&\\k0}}{text}"
-              if dual else sung)
+      # Japanese romaji fills per kana mora, split by the romanizer (foreign
+      # words stay whole); Chinese/Korean romaji is already one syllable per
+      # token and an all-latin line keeps its own words, both per whitespace word
+      japanese = dual and (locale or "") not in ("zh", "ko")
+      if spans:
+        units = [(u, u) for u in mora_units(text)] if japanese else None
+        fill = _kanji_kf(units, spans, end - start) if units else _kf_line(
+          sung, spans, end - start)
+        sung = fill or sung
+      kfill = None
+      if dual:
+        # the original line carries its own karaoke: per word for Japanese, per
+        # glyph for Chinese/Korean, timed off the same romaji spans
+        kpairs = cjk_pairs(text, locale or None) if spans else None
+        kfill = _kanji_kf(kpairs, spans, end - start) if kpairs else None
+        if kfill:
+          # it is itself a sung line, so only shrink it: the \k fill then reveals
+          # grey unsung -> white sung, the same highlight as the romaji above
+          orig = f"{{\\fs{dim_size}}}{kfill}"
+        else:
+          # no per-glyph timing: a static dimmed reference. Dim only the fill
+          # (\1a), keep the outline opaque and a touch thicker, so it stays
+          # readable over busy video instead of washing out
+          dim_border = st["outline"] + ASS_DIM_BORDER_BOOST
+          orig = (f"{{\\fs{dim_size}\\1a&H{ASS_DIM_ALPHA}&"
+                  f"\\bord{dim_border}\\k0}}{text}")
+        text = f"{sung}\\N{orig}"
+      else:
+        text = sung
+      tr = (translations or {}).get(seg[2])
+      if kfill:
+        # two sung lines cannot share one event: \k time accumulates across \N,
+        # so the lower line's fill would only start after the upper line's runs
+        # elapse. Emit each as its own event, stacked bottom-up by MarginV, each
+        # with its own \k timeline from zero. Translation sits below the original.
+        stack, below = [], ASS_MARGIN_V
+        if tr:
+          stack.append((below, "Translation", tr))
+          below += dim_size + ASS_STACK_GAP
+        stack.append((below, "Default", orig))
+        below += dim_size + ASS_STACK_GAP
+        stack.append((below, "Default", sung))
+        for mv, sty, ln in stack:
+          body.append(f"Dialogue: 0,{ass_timestamp(start)},{ass_timestamp(end)},"
+                      f"{sty},,0,0,{mv},,{fade}{ln}")
+        continue
       # \r switches the rest of the line to the named style, so the colour and
       # the dim size both come from the header rather than more inline tags
-      tr = (translations or {}).get(seg[2])
       if tr:
         text += f"\\N{{\\rTranslation}}{tr}"
     body.append(f"Dialogue: 0,{ass_timestamp(start)},{ass_timestamp(end)},"

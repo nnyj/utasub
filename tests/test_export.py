@@ -20,23 +20,25 @@ def _spans(rom, per=0.2, at=0.0):
     at += per
   return out
 
-# --- \kf run building ---
+# --- \k run building ---
 
-def test_kf_runs_start_on_the_span_they_were_built_from():
+def test_kf_runs_start_on_the_word_they_were_built_from():
   """Summing to the cue length is an identity of the run builder, true for any
-  spans it accepts. What can break is which syllable each run pays for, so the
-  cumulative time of every run is checked against its own span."""
+  spans it accepts. What can break is which word each run pays for, so the
+  cumulative time of every run is checked against its word's first span."""
   import re
   rom = "yume no tsuzuki"
   spans = _spans(rom, per=0.2)
   line = export._kf_line(rom, spans, cue_len=3.0)
   assert line is not None
-  cs = [int(n) for n in re.findall(r"\\kf(\d+)", line)]
-  assert len(cs) == len(spans), (cs, line)  # no leading wait: first span at 0.0
-  acc = 0
-  for n, (_c, start, _end) in zip(cs, spans):
-    assert acc == round(start * 100), (acc, start, line)
+  cs = [int(n) for n in re.findall(r"\\k(\d+)", line)]
+  words = rom.split()
+  assert len(cs) == len(words), (cs, line)  # one run per word, none leading
+  idx, acc = 0, 0
+  for word, n in zip(words, cs):
+    assert acc == round(spans[idx][1] * 100), (acc, spans[idx][1], line)
     acc += n
+    idx += len(word)
   assert acc == 300, (acc, line)
 
 def test_kf_runs_keep_every_character_of_the_romaji():
@@ -49,14 +51,24 @@ def test_kf_leading_gap_becomes_an_empty_run():
   fill has to wait, not start under the first syllable."""
   rom = "abc"
   line = export._kf_line(rom, _spans(rom, per=0.1, at=0.5), cue_len=1.0)
-  assert line.startswith("{\\kf50}{\\kf"), line
+  assert line.startswith("{\\k50}{\\k"), line
 
-def test_kf_untimed_characters_ride_the_run_before_them():
-  """Whitespace is dropped by the aligner, so it cannot own a run of its own."""
+def test_kf_untimed_characters_ride_the_word_before_them():
+  """Whitespace is dropped by the aligner, so it cannot own a run of its own and
+  rides the word it follows, which is also where the per-word run ends."""
   rom = "ab cd"
   line = export._kf_line(rom, _spans(rom, per=0.1), cue_len=0.5)
-  assert line.count("{\\kf") == 4, line  # 4 timed chars, no run for the space
-  assert "}b {" in line, "the space did not stay attached to the b run"
+  assert line.count("{\\k") == 2, line  # 2 words, no run for the space
+  assert "}ab {" in line, "the space did not stay attached to the ab word"
+
+def test_kf_line_groups_by_whitespace_word():
+  """_kf_line fills per whitespace word; Japanese mora come pre-split from the
+  romanizer, so this path only ever sees word units (romaji, pinyin, English)."""
+  import re
+  rom = "ni hao ma"
+  line = export._kf_line(rom, _spans(rom, per=0.1), cue_len=0.7)
+  units = re.findall(r"\{[^}]*\}([^{]*)", line)
+  assert units == ["ni ", "hao ", "ma"], units
 
 def test_kf_gives_up_when_the_spans_do_not_match_the_romaji():
   """A retyped line or a different pinned locale must fall back to plain text,
@@ -75,28 +87,70 @@ def test_ass_emits_kf_only_for_cues_carrying_spans():
     out = export.export_ass(_tmp_media(tmp), [cue, plain], offset=0.0, lead=0.0)
     lines = [l for l in out.read_text(encoding="utf-8").splitlines()
              if l.startswith("Dialogue:")]
-  assert "\\kf" in lines[0], lines[0]
-  assert "\\kf" not in lines[1], lines[1]
+  # the timed cue splits into two single-line events (romaji + kanji), both with
+  # a \k fill; the plain cue stays one \N event with no fill on its romaji half
+  single = [l for l in lines if "\\N" in l]
+  assert len(single) == 1, lines
+  assert "\\k" not in single[0].split("\\N")[0], single[0]
+  fills = [l for l in lines if "\\N" not in l]
+  assert len(fills) == 2 and all("\\k" in l for l in fills), fills
 
 def test_ass_kf_runs_follow_the_spans_through_the_export():
-  """Through export_ass the fill must still sit on the syllables the aligner
-  timed, not merely add up to the cue."""
+  """Through export_ass a CJK line fills per syllable: every run must begin on a
+  real token start, be monotone, and tile the whole cue."""
   import re
   from utasub.core.romanize import romanize
   cue = Cue(10.0, 14.0, "そらに浮かぶ月", "lrc")
-  spans = _spans(romanize(cue.text, locale="ja"), per=0.1)
+  rom = romanize(cue.text, locale="ja")
+  spans = _spans(rom, per=0.1)
   cue.token_spans = spans
   with tempfile.TemporaryDirectory() as tmp:
     out = export.export_ass(_tmp_media(tmp), [cue], offset=0.0, lead=0.0)
     body = [l for l in out.read_text(encoding="utf-8").splitlines()
             if l.startswith("Dialogue:")][0]
   romaji_line = body.split("\\N")[0]
-  cs = [int(n) for n in re.findall(r"\\kf(\d+)", romaji_line)]
+  cs = [int(n) for n in re.findall(r"\\k(\d+)", romaji_line)]
+  starts = {round(s * 100) for _c, s, _e in spans}
   acc = 0
-  for n, (_c, start, _end) in zip(cs, spans):
-    assert acc == round(start * 100), (acc, start, romaji_line)
+  for n in cs:
+    assert acc in starts, (acc, starts, romaji_line)  # run opens on a token
     acc += n
-  assert acc == 400, (acc, romaji_line)
+  assert acc == 400, (acc, romaji_line)  # tiles the 4.0s cue
+
+def _kanji_event(lines, glyph):
+  """The stacked original-line event, found by a glyph only it carries."""
+  return [l for l in lines if glyph in l and "\\N" not in l][0]
+
+def test_ass_original_line_gets_per_word_kanji_karaoke():
+  """The original also fills, as its own stacked event: Japanese per word (a
+  multi-glyph word one run), timed off the same romaji spans, not fill-dimmed."""
+  import re
+  from utasub.core.romanize import romanize
+  cue = Cue(10.0, 14.0, "空に浮かぶ月", "lrc")
+  cue.token_spans = _spans(romanize(cue.text, locale="ja"), per=0.1)
+  with tempfile.TemporaryDirectory() as tmp:
+    out = export.export_ass(_tmp_media(tmp), [cue], offset=0.0, lead=0.0)
+    lines = [l for l in out.read_text(encoding="utf-8").splitlines()
+             if l.startswith("Dialogue:")]
+  orig = _kanji_event(lines, "空")
+  assert len(lines) == 2 and "\\N" not in orig, lines  # own event, not stacked in \N
+  # a karaoke'd original is only shrunk, never fill-dimmed, or its \k reveal
+  # would run backwards (grey -> transparent instead of grey -> white)
+  assert "\\1a&H" not in orig, orig
+  units = re.findall(r"\{\\k\d+\}([^{]*)", orig)
+  assert units == ["空", "に", "浮かぶ", "月"], units  # 浮かぶ stays one word
+
+def test_ass_original_line_chinese_karaoke_is_per_glyph():
+  import re
+  cue = Cue(10.0, 13.0, "你好", "lrc")
+  cue.token_spans = [("n", 0.0, 0.5), ("i", 0.5, 1.0),
+                     ("h", 1.5, 2.0), ("a", 2.0, 2.5), ("o", 2.5, 3.0)]
+  with tempfile.TemporaryDirectory() as tmp:
+    out = export.export_ass(_tmp_media(tmp), [cue], offset=0.0, lead=0.0)
+    lines = [l for l in out.read_text(encoding="utf-8").splitlines()
+             if l.startswith("Dialogue:")]
+  units = re.findall(r"\{\\k\d+\}([^{]*)", _kanji_event(lines, "你"))
+  assert units == ["你", "好"], units  # one run per hanzi
 
 def test_write_time_offset_carries_the_karaoke_spans():
   """offset/lead rebuild the Cue, and spans are relative to its start: dropped
@@ -123,7 +177,7 @@ def test_ass_mc_line_is_romaji_only():
   assert "\\N" not in line, "MC line got a second line"
 
 def test_ass_unsung_colour_is_grey_not_the_default_red():
-  """SecondaryColour is the unfilled half of a \\kf wipe."""
+  """SecondaryColour is the unfilled half of a \\k wipe."""
   with tempfile.TemporaryDirectory() as tmp:
     out = export.export_ass(_tmp_media(tmp), [Cue(1.0, 2.0, "hi", None)],
                             offset=0.0, lead=0.0)
@@ -235,7 +289,7 @@ def test_english_lyric_line_still_gets_a_fill():
     out = export.export_ass(_tmp_media(tmp), [cue], offset=0.0, lead=0.0)
     line = [l for l in out.read_text(encoding="utf-8").splitlines()
             if l.startswith("Dialogue:")][0]
-  assert "\\kf" in line, line
+  assert "\\k" in line, line
   assert "\\N" not in line, "English line got a dimmed duplicate"
   import re
   bare = re.sub(r"\{[^}]*\}", "", line.split(",", 9)[9])
@@ -247,7 +301,7 @@ def test_spans_running_past_a_trimmed_cue_end_are_clamped():
   import re
   rom = "abcd"
   line = export._kf_line(rom, _spans(rom, per=1.0), cue_len=2.0)
-  total = sum(int(n) for n in re.findall(r"\\kf(\d+)", line))
+  total = sum(int(n) for n in re.findall(r"\\k(\d+)", line))
   assert total == 200, (total, line)
 
 # --- gap 8: .ass style knobs ---
