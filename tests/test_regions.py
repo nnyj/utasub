@@ -1,6 +1,5 @@
 """Region detection, query extraction, serialization. No GPU."""
 
-
 def _make_segments(regions_spec):
   """Create synthetic ASR segments from [(start, end, n_segs, text_template), ...]."""
   segs = []
@@ -12,7 +11,6 @@ def _make_segments(regions_spec):
   segs.sort(key=lambda x: x[0])
   return segs
 
-
 def _fake_audio_with_gaps(duration_s, singing_regions, sr=16000):
   """Loud sine in singing regions, silence elsewhere."""
   import numpy as np
@@ -23,7 +21,6 @@ def _fake_audio_with_gaps(duration_s, singing_regions, sr=16000):
     t = np.arange(e_idx - s_idx) / sr
     audio[s_idx:e_idx] = 0.3 * np.sin(2 * np.pi * 440 * t).astype(np.float32)
   return audio
-
 
 def test_detect_regions_from_audio_gaps():
   """3 regions, boundaries approx correct."""
@@ -40,7 +37,6 @@ def test_detect_regions_from_audio_gaps():
   assert abs(regions[1].start - 90) < 2
   assert abs(regions[2].start - 180) < 2
 
-
 def test_detect_regions_falls_back_to_asr_gaps_without_audio():
   from utasub.core.regions import detect_regions
   segs = _make_segments([
@@ -49,7 +45,6 @@ def test_detect_regions_falls_back_to_asr_gaps_without_audio():
   ])
   regions = detect_regions(segs, None, gap_threshold=25, min_region=20)
   assert len(regions) == 2, f"expected 2 regions, got {len(regions)}"
-
 
 def test_detect_regions_filters_short_clusters():
   """Cluster shorter than min_region (5s blip) dropped."""
@@ -62,7 +57,6 @@ def test_detect_regions_filters_short_clusters():
   ])
   regions = detect_regions(segs, audio, gap_threshold=25, min_region=20)
   assert len(regions) == 2, f"expected 2 (5s blip filtered), got {len(regions)}"
-
 
 def test_region_query_extracts_phrases_for_japanese_and_english():
   """Short JP phrases, frequent EN content words."""
@@ -85,13 +79,11 @@ def test_region_query_extracts_phrases_for_japanese_and_english():
   ], Region(0, 100))
   assert "walking" in en.lower(), f"expected 'walking' in query: {en}"
 
-
 def test_region_segments_returns_only_in_bounds():
   from utasub.core.regions import region_segments, Region
   segs = [(10, 15, "a"), (50, 55, "b"), (70, 75, "c"), (110, 115, "d")]
   result = region_segments(segs, Region(50, 100))
   assert [t for _, _, t in result] == ["b", "c"]
-
 
 def test_region_dict_roundtrip():
   from utasub.core.regions import Region

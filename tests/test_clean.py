@@ -5,7 +5,6 @@ from lyrickit import classify_lines, filter_credit_lines
 
 from utasub.core.providers import parse_lrc
 
-
 NETEASE_LRC = """\
 [ti:天青色等烟雨]
 [ar:周杰倫]
@@ -17,7 +16,6 @@ NETEASE_LRC = """\
 [00:10.00]炊烟袅袅升起 隔江千万里
 [00:35.00] February: the month of love
 """
-
 
 def test_parsed_lrc_feeds_the_credit_detector():
   """classify_lines accepts parse_lrc's (time, text) rows; filter_credit_lines

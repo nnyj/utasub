@@ -29,7 +29,6 @@ DEFAULT_STEM_MODEL = "vocals_mel_band_roformer.ckpt"
 # None = audio-separator's own model cache
 DEFAULT_STEM_MODEL_DIR = os.environ.get("UTASUB_STEM_MODEL_DIR") or None
 
-
 def asr_available():
   """True when the ASR model package is importable."""
   try:
@@ -37,7 +36,6 @@ def asr_available():
     return True
   except ImportError:
     return False
-
 
 # --- silence chunking (clean vocals dip; full mix falls back to one chunk) ---
 
@@ -78,11 +76,9 @@ def split_on_silence(audio, sr=16000, min_gap=0.5, min_voice=0.3, pad=0.15, max_
     chunks.append((t0, t1))
   return chunks or [(0.0, dur)]
 
-
 # --- segment grouping ---
 
 SENTENCE_ENDS = set("。！？.!?")
-
 
 def smart_join(tokens):
   # space between two ASCII-word boundaries only: EN keeps spacing, CJK stays fused
@@ -92,7 +88,6 @@ def smart_join(tokens):
       out += " "
     out += t
   return re.sub(r" +", " ", out)
-
 
 def group_into_segments(stamps, max_duration=8.0, max_chars=40, max_gap=0.8):
   segments = []
@@ -126,17 +121,7 @@ def group_into_segments(stamps, max_duration=8.0, max_chars=40, max_gap=0.8):
   flush()
   return segments
 
-
 # --- stem separation (vocals only, FLAC, cached) ---
-
-def find_instrumental(media_path):
-  """Cached instrumental stem <name>.instrumental.*, or None.
-  Optional: everything works with vocals stem alone."""
-  want = f"{Path(media_path).stem}.instrumental".lower()
-  cache = stem_cache_dir()
-  return next((f for f in cache.iterdir()
-               if f.is_file() and f.stem.lower() == want), None)
-
 
 def extract_vocals(media_path, stem_model, model_dir, progress):
   """Separate stems into stem cache as <name>.vocals.flac and
@@ -154,8 +139,13 @@ def extract_vocals(media_path, stem_model, model_dir, progress):
   # audio-separator uses its own cache
   sep = Separator(output_dir=str(out_dir), output_format="FLAC",
                   **({"model_file_dir": model_dir} if model_dir else {}))
+  # audio-separator exposes no progress callback, so bracket stages with elapsed
+  start_time = time.time()
+  progress(f"  loading stem model {stem_model}...")
   sep.load_model(stem_model)
+  progress(f"  stem model loaded ({time.time() - start_time:.0f}s), separating...")
   outputs = sep.separate(str(media_path))
+  progress(f"  separated ({time.time() - start_time:.0f}s)")
   stem = Path(media_path).stem
   vocals = None
   for name in outputs:
@@ -168,7 +158,6 @@ def extract_vocals(media_path, stem_model, model_dir, progress):
     if kind == "vocals":
       vocals = dest
   return vocals
-
 
 # --- model ---
 
@@ -189,7 +178,6 @@ def _load_model(small, cpu, progress):
     # required by return_time_stamps=True: Qwen stamps words via the aligner
     forced_aligner="Qwen/Qwen3-ForcedAligner-0.6B",
     forced_aligner_kwargs=dict(dtype=dtype, device_map=device))
-
 
 # --- top-level ---
 
@@ -228,9 +216,19 @@ def transcribe(media_path, *, lang=None, small=False, cpu=False, use_stems=True,
 
   progress("  transcribing...")
   model = _load_model(small, cpu, progress)
-  results = model.transcribe(
-    audio=[(audio[int(cs * 16000):int(ce * 16000)], 16000) for cs, ce in chunks],
-    language=lang_name, return_time_stamps=True)
+  batch_size = 20
+  total = len(chunks)
+  results = []
+  start_time = time.time()
+  for i in range(0, total, batch_size):
+    batch = chunks[i:i + batch_size]
+    results.extend(model.transcribe(
+      audio=[(audio[int(cs * 16000):int(ce * 16000)], 16000) for cs, ce in batch],
+      language=lang_name, return_time_stamps=True))
+    done = len(results)
+    # elapsed-per-chunk so far; max() guards a batch that returned nothing
+    eta = (time.time() - start_time) / max(done, 1) * (total - done)
+    progress(f"  {done}/{total} chunks, {eta:.0f}s left")
 
   segments = []
   langs = []
@@ -256,7 +254,6 @@ def transcribe(media_path, *, lang=None, small=False, cpu=False, use_stems=True,
   progress(f"  -> {out_path.name}  ({time.time() - start:.0f}s)")
   return out_path
 
-
 # --- CLI (utasub-asr) ---
 
 def main():
@@ -276,7 +273,6 @@ def main():
   for target in args.targets:
     transcribe(target, lang=args.lang, small=args.small, cpu=args.cpu,
                use_stems=args.stems, overwrite=args.overwrite)
-
 
 if __name__ == "__main__":
   main()

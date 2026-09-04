@@ -2,7 +2,6 @@
 Tool never runs ASR; asr_gen writes the block, this reads it."""
 from .session import _read_raw
 
-
 def load_asr(media_path):
   """ASR block from the session file next to media_path.
   Returns (segments, language) where segments = [(start, end, text), ...],

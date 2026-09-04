@@ -7,7 +7,6 @@ from typing import Optional
 from .align import voiced_envelope, voiced_runs
 from .romanize import is_cjk
 
-
 @dataclass
 class Region:
   """Time interval owning one candidate and its alignment."""
@@ -15,6 +14,8 @@ class Region:
   end: float
   candidate_idx: Optional[int] = None
   mc: bool = False   # spoken intermission: skip lyric fetch, setlist slot
+  suspect: bool = False   # weak or near-tied auto-assignment, uncertain
+  runner_up: str = ""     # title the winning assignment beat, when suspect
 
   @property
   def duration(self):
@@ -22,13 +23,14 @@ class Region:
 
   def to_dict(self):
     return {"start": round(self.start, 3), "end": round(self.end, 3),
-            "candidate_idx": self.candidate_idx, "mc": self.mc}
+            "candidate_idx": self.candidate_idx, "mc": self.mc,
+            "suspect": self.suspect, "runner_up": self.runner_up}
 
   @staticmethod
   def from_dict(d):
     return Region(d["start"], d["end"], d.get("candidate_idx"),
-                  bool(d.get("mc", False)))
-
+                  bool(d.get("mc", False)), bool(d.get("suspect", False)),
+                  d.get("runner_up", ""))
 
 # --- detection ---
 
@@ -61,7 +63,6 @@ def detect_regions(segments, audio, sr=16000,
   regions = [Region(s, e) for s, e in clusters if e - s >= min_region]
   return regions
 
-
 def _regions_from_asr_gaps(segments, gap_threshold, min_region):
   """Fallback: detect regions from ASR segment gaps when no audio."""
   if not segments:
@@ -74,7 +75,6 @@ def _regions_from_asr_gaps(segments, gap_threshold, min_region):
     else:
       clusters.append((s, e))
   return [Region(s, e) for s, e in clusters if e - s >= min_region]
-
 
 def expand_window(regions, idx, lrc_span, assigned=None, margin_min=30.0, pad=10.0):
   """Alignment window for a region: its own span plus margin, absorbing any
@@ -105,7 +105,6 @@ def expand_window(regions, idx, lrc_span, assigned=None, margin_min=30.0, pad=10
     w1 = min(w1, regions[k].start)
   return max(0.0, w0), max(w1, r.end)
 
-
 # --- region-scoped query extraction ---
 
 # Japanese particles/fillers to strip from n-gram queries
@@ -122,7 +121,6 @@ _EN_STOPWORDS = set("the a an is are was were be been being have has had do does
                     " beside besides beyond down inside near off onto opposite outside past"
                     " since toward under until upon not no oh yeah hey".split())
 
-
 def _is_content_word(word):
   """True if word looks like a content word (not particle/filler)."""
   w = word.lower().strip()
@@ -131,7 +129,6 @@ def _is_content_word(word):
   if w in _JP_PARTICLES or w in _EN_STOPWORDS:
     return False
   return True
-
 
 def _extract_ja_phrases(segments, region):
   """Extract short distinctive Japanese phrases from ASR segments in region.
@@ -148,7 +145,6 @@ def _extract_ja_phrases(segments, region):
       else:
         phrases.append(run[:8])
   return phrases
-
 
 def region_query(segments, region, max_phrases=2, exclude=None):
   """Extract search query from ASR segments in region.
@@ -194,7 +190,6 @@ def region_query(segments, region, max_phrases=2, exclude=None):
     ranked = sorted(freq.items(), key=lambda x: (-x[1], -len(x[0])))
     return " ".join(w for w, _ in ranked[:3])
 
-
 def region_segments(segments, region, exclude=None):
   """Return ASR segments within region bounds.
   exclude: [(start, end), ...] spans to drop (MC speech)."""
@@ -205,12 +200,10 @@ def region_segments(segments, region, exclude=None):
     out = strip_mc(out, exclude)
   return out
 
-
 def fmt_time(seconds):
   """Format seconds as mm:ss."""
   m, s = divmod(int(seconds), 60)
   return f"{m:02d}:{s:02d}"
-
 
 def print_region_table(regions):
   """Print region table to stdout."""

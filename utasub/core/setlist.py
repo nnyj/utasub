@@ -11,7 +11,6 @@ from .providers import LYRICS_DIR
 TEXT_CAP = 15000  # max chars fed to extraction
 USER_AGENT = "utasub/1.0 (setlist lookup)"
 
-
 def _http_get(url, headers=None, timeout=10):
   """GET returning text (utf-8) or None on network failure."""
   req = urllib.request.Request(url, headers=headers or {"User-Agent": USER_AGENT})
@@ -22,15 +21,12 @@ def _http_get(url, headers=None, timeout=10):
     return None
   return raw.decode("utf-8", errors="replace")
 
-
 def _slug(text):
   return re.sub(r'[<>:"/\\|?*\s]+', "_", text).strip("_").lower()[:80]
-
 
 def _cache_write(path, data):
   path.parent.mkdir(parents=True, exist_ok=True)
   path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-
 
 # --- Wikipedia ---
 
@@ -44,7 +40,6 @@ def _wiki_search(query, lang="ja", limit=3):
   data = json.loads(raw)
   return [r["title"] for r in data.get("query", {}).get("search", [])]
 
-
 def _wiki_wikitext(title, lang="ja"):
   """Fetch wikitext for a page. Returns str or None."""
   url = (f"https://{lang}.wikipedia.org/w/api.php?action=parse"
@@ -54,7 +49,6 @@ def _wiki_wikitext(title, lang="ja"):
     return None
   data = json.loads(raw)
   return data.get("parse", {}).get("wikitext", {}).get("*")
-
 
 def _wiki_discover(artist, keywords):
   """Search ja + en Wikipedia for setlist/tracklist pages. Returns (source_label, text) list."""
@@ -80,7 +74,6 @@ def _wiki_discover(artist, keywords):
         break  # found in this language, skip remaining keywords
   return results
 
-
 def _extract_around_keywords(text, keywords, cap=TEXT_CAP):
   """Text around first matching keyword, capped."""
   lower = text.lower()
@@ -90,7 +83,6 @@ def _extract_around_keywords(text, keywords, cap=TEXT_CAP):
       start = max(0, idx - 200)
       return text[start:start + cap]
   return ""
-
 
 # --- extraction ---
 
@@ -127,7 +119,6 @@ def _extract_heuristic(text):
 
   return []
 
-
 # --- pasted setlist ---
 
 # header/section lines carrying no title
@@ -146,7 +137,6 @@ _RE_LEAD_NUM = re.compile(
 _RE_TIMESTAMP = re.compile(r"[\[(]?\d{1,2}:\d{2}(?::\d{2})?[\])]?")
 _RE_SEP = re.compile(r"\s*[,、/／｜|]\s*")
 
-
 def _clean_pasted_line(line):
   """Strip bullets, numbering, timestamps, header prefixes off one pasted
   line. Returns title or ""."""
@@ -159,7 +149,6 @@ def _clean_pasted_line(line):
   if not s or _RE_JUNK_LINE.match(s) or s.isdigit():
     return ""
   return s
-
 
 def parse_pasted(text):
   """Parse a hand-pasted setlist into ordered titles.
@@ -188,14 +177,12 @@ def parse_pasted(text):
       out.append(t)
   return out
 
-
 # --- cache ---
 
 def _cache_path(hints):
   """Cache file path from hints dict, readable "artist - keywords" name."""
   slug = _slug(f"{hints.get('artist', '')} - {' '.join(hints.get('keywords', []))}")
   return LYRICS_DIR / "setlist" / f"{slug}.json"
-
 
 def _cache_read(hints, fresh=False):
   """Read cached setlist result. Returns dict or None."""
@@ -209,11 +196,9 @@ def _cache_read(hints, fresh=False):
   except Exception:
     return None
 
-
 def _cache_save(hints, data):
   """Save setlist result to cache."""
   _cache_write(_cache_path(hints), data)
-
 
 # --- main API ---
 
@@ -259,7 +244,6 @@ def discover(hints, fresh=False):
   _cache_save(hints, {"tracklist": [], "source": "", "method": "none"})
   print(f"  setlist: no tracklist found ({len(all_sources)} pages checked)")
   return [], "", "none"
-
 
 def hints_from_path(path, artist_hint=""):
   """Build hints dict from media file path and optional artist.

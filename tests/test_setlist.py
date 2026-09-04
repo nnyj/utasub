@@ -7,7 +7,6 @@ import pytest
 from pathlib import Path
 from unittest import mock
 
-
 WIKI_NUMBERED = """\
 == セットリスト ==
 1. 星の欠片
@@ -37,7 +36,7 @@ WIKI_TABLE = """\
 
 MESSY_WEB = """\
 <div class="setlist-body">
-Concert review: Hoshikuzu Live 2024 at Aozora Hall
+Concert recap: Hoshikuzu Live 2024 at Aozora Hall
 Setlist:
 1. 星の欠片 (Hoshi no Kakera)
 2. 雨のあとで (Ame no Ato de)
@@ -56,14 +55,12 @@ They are a Japanese band formed in 2017.
 No setlist information here at all.
 """
 
-
 def test_heuristic_extracts_wiki_numbered_list():
   from utasub.core.setlist import _extract_heuristic
   tracks = _extract_heuristic(WIKI_NUMBERED)
   assert len(tracks) == 10
   assert tracks[0][1] == "星の欠片"
   assert tracks[9][1] == "遠遠遠夜"
-
 
 def test_heuristic_extracts_wiki_track_template():
   from utasub.core.setlist import _extract_heuristic
@@ -72,18 +69,15 @@ def test_heuristic_extracts_wiki_track_template():
   assert tracks[0] == (1, "星の欠片")
   assert tracks[3] == (4, "だから僕は歌を書いた")
 
-
 def test_heuristic_extracts_from_messy_web_page():
   from utasub.core.setlist import _extract_heuristic
   tracks = _extract_heuristic(MESSY_WEB)
   assert len(tracks) >= 5
   assert "星の欠片" in tracks[0][1]
 
-
 def test_heuristic_returns_empty_when_no_tracklist():
   from utasub.core.setlist import _extract_heuristic
   assert _extract_heuristic(NO_TRACKLIST) == []
-
 
 # --- parse_pasted ---
 
@@ -116,19 +110,16 @@ PASTE_CASES = [
   ("", []),
 ]
 
-
 @pytest.mark.parametrize("text,expected", PASTE_CASES)
 def test_parse_pasted_formats(text, expected):
   from utasub.core.setlist import parse_pasted
   assert parse_pasted(text) == expected
-
 
 def test_parse_pasted_keeps_comma_inside_a_lone_title():
   """One comma in a single line among many is part of the title, not a delimiter."""
   from utasub.core.setlist import parse_pasted
   titles = parse_pasted("1. Hello, Goodbye\n2. 雨のあとで\n3. 夜明けの唄")
   assert titles[0] == "Hello, Goodbye"
-
 
 def test_setlist_file_titles_reach_the_dp():
   """--setlist-file: load_setlist_file -> _multi_song_prepare -> DP tracklist."""
@@ -148,7 +139,8 @@ def test_setlist_file_titles_reach_the_dp():
 
     regions = [Region(0.0, 300.0), Region(300.0, 600.0)]
     segments = [(0.0, 5.0, "x"), (700.0, 1300.0, "y")]
-    with mock.patch.object(cli, "_setlist_dp_assign", side_effect=fake_dp), \
+    from utasub.core import multi_song
+    with mock.patch.object(multi_song, "_setlist_dp_assign", side_effect=fake_dp), \
          mock.patch("utasub.core.regions.detect_regions", return_value=regions), \
          mock.patch("utasub.core.providers.media_tags", return_value={}), \
          mock.patch("utasub.core.setlist.discover") as disc:
@@ -158,7 +150,6 @@ def test_setlist_file_titles_reach_the_dp():
     disc.assert_not_called()
     assert seen["tracklist"] == [(1, "Track A"), (2, "Track B")]
     assert seen["source_label"] == "Setlist:Manual"
-
 
 def test_discover_returns_tracklist_from_wikipedia():
   from utasub.core import setlist
@@ -180,7 +171,6 @@ def test_discover_returns_tracklist_from_wikipedia():
   assert "Wikipedia" in source
   assert method == "heuristic"
 
-
 def test_discover_returns_empty_when_nothing_found():
   from utasub.core import setlist
 
@@ -199,7 +189,6 @@ def test_discover_returns_empty_when_nothing_found():
   assert tracks == []
   assert method == "none"
 
-
 def test_cache_write_then_read_roundtrip():
   from utasub.core import setlist
   hints = {"artist": "CacheTest", "keywords": ["live"]}
@@ -212,7 +201,6 @@ def test_cache_write_then_read_roundtrip():
       assert loaded is not None
       assert len(loaded["tracklist"]) == 2
       assert loaded["source"] == "test"
-
 
 def test_hints_from_path_extracts_keywords_and_strips_live():
   from utasub.core.setlist import hints_from_path
