@@ -15,7 +15,7 @@ dependencies = [
   "numpy",
   # not on PyPI; for development a local editable install overrides these
   "lyrickit @ git+https://github.com/nnyj/lyrickit",
-  "romakit[jp] @ git+https://github.com/nnyj/romakit",
+  "romakit[jp,zh,ko] @ git+https://github.com/nnyj/romakit",
 ]
 
 [project.scripts]
@@ -29,9 +29,6 @@ utasub-gui = "utasub.cli:main"
 gui = ["PySide6"]
 # ASR generation (Transcribe button / utasub-asr). Heavy: torch pulled by qwen-asr.
 asr = ["qwen-asr", "audio-separator", "torchaudio"]
-# CJK romanization beyond Japanese (romakit[jp] covers ja)
-zh = ["pypinyin"]
-ko = ["korean-romanizer"]
 
 [tool.setuptools.packages.find]
 include = ["utasub*"]
