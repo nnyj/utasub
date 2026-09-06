@@ -181,12 +181,12 @@ ASS_HEADER_CASES = [
   # defaults: constants reach the Default line, SecondaryColour is the grey
   # unfilled half of a \k wipe (not the ASS default red), Translation declared
   (None, [f"Style: Default,{export.ASS_FONT},{export.ASS_FONT_SIZE},",
-          f",100,100,0,0,1,{export.ASS_OUTLINE},{export.ASS_SHADOW},2,60,60,",
-          export.ASS_UNSUNG_COLOUR,
+          f",100,100,0,0,1,{export.ASS_OUTLINE},{export.ASS_SHADOW},2,100,100,",
+          export.ASS_UNSUNG_COLOUR, f",{export.ASS_SHADOW_COLOUR},-1,0,0,0,",
           "Style: Translation,", export.ASS_TR_COLOUR]),
   # style knobs: BorderStyle 3, top alignment
   ({"font": "Meiryo", "size": 40, "outline": 5, "box": True, "pos": 8},
-   ["Style: Default,Meiryo,40,", ",100,100,0,0,3,5,1,8,60,60,"]),
+   ["Style: Default,Meiryo,40,", f",100,100,0,0,3,5,{export.ASS_SHADOW},8,100,100,"]),
 ]
 
 @pytest.mark.parametrize("style,substrings", ASS_HEADER_CASES)

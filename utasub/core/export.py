@@ -133,15 +133,21 @@ def export_srt(media_path, segments, romaji=True, offset=None, lead=None):
 
 # --- .ass (styled dual-line: romaji on top, original dimmed below) ---
 # All knobs default here; override per call to restyle without touching cues.
+# Font/bold/shadow alpha/margins follow the MPC-BE default SRT style (Arial 18
+# bold, margins 20 on a 384x288 basis, x3.75 to the 1080p PlayRes). Outline and
+# shadow sit under its 7.5/11 equivalents, which read heavy at 1080p.
 ASS_FONT = "Arial"
-ASS_FONT_SIZE = 72
+ASS_FONT_SIZE = 68
+ASS_BOLD = -1              # ASS bool, -1 = on
 ASS_DIM_SCALE = 0.72       # original-line size vs romaji, 0..1
 ASS_DIM_ALPHA = "80"       # original-line fill transparency, ASS hex 00=opaque..FF=clear
 ASS_DIM_BORDER_BOOST = 1   # extra outline px on the dim line, keeps it legible on busy video
 ASS_FADE_MS = (120, 120)   # (fade-in, fade-out) per cue, ms
-ASS_OUTLINE = 3
-ASS_SHADOW = 1
-ASS_MARGIN_V = 54          # gap from the bottom edge, PlayRes px
+ASS_OUTLINE = 4
+ASS_SHADOW = 5
+ASS_SHADOW_COLOUR = "&H80000000"   # black at 50% alpha
+ASS_MARGIN_H = 100         # left/right margin, PlayRes px
+ASS_MARGIN_V = 75          # gap from the bottom edge, PlayRes px
 ASS_STACK_GAP = 6          # gap between stacked karaoke lines, PlayRes px
 ASS_PLAY_RES = (1920, 1080)
 ASS_MC_SCALE = 0.6         # MC (spoken) line size vs lyric lines
@@ -267,14 +273,16 @@ def _ass_header(font, font_size, outline, shadow, margin_v, play_res,
     "ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, "
     "MarginR, MarginV, Encoding\n"
     f"Style: Default,{font},{font_size},&H00FFFFFF,{ASS_UNSUNG_COLOUR},&H00000000,"
-    f"&H00000000,0,0,0,0,100,100,0,0,{border},{outline},{shadow},{align},60,60,"
-    f"{margin_v},1\n"
+    f"{ASS_SHADOW_COLOUR},{ASS_BOLD},0,0,0,100,100,0,0,{border},{outline},{shadow},"
+    f"{align},{ASS_MARGIN_H},{ASS_MARGIN_H},{margin_v},1\n"
     f"Style: MC,{font},{max(1, round(font_size * ASS_MC_SCALE))},{ASS_MC_COLOUR},"
-    f"&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,{border},{outline},"
-    f"{shadow},{align},60,60,{margin_v},1\n"
+    f"&H000000FF,&H00000000,{ASS_SHADOW_COLOUR},{ASS_BOLD},0,0,0,100,100,0,0,"
+    f"{border},{outline},{shadow},{align},{ASS_MARGIN_H},{ASS_MARGIN_H},"
+    f"{margin_v},1\n"
     f"Style: Translation,{font},{max(1, round(font_size * ASS_DIM_SCALE))},"
-    f"{ASS_TR_COLOUR},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,"
-    f"{border},{outline},{shadow},{align},60,60,{margin_v},1\n\n"
+    f"{ASS_TR_COLOUR},&H000000FF,&H00000000,{ASS_SHADOW_COLOUR},{ASS_BOLD},0,0,0,"
+    f"100,100,0,0,{border},{outline},{shadow},{align},{ASS_MARGIN_H},"
+    f"{ASS_MARGIN_H},{margin_v},1\n\n"
     "[Events]\n"
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
     "Effect, Text\n")

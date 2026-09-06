@@ -3,6 +3,7 @@ import pytest
 
 from utasub.core.providers import Candidate
 from utasub.core import session
+from utasub.core import export as export_mod
 
 def _media(tmp_path):
   media = tmp_path / "test_song.mkv"
@@ -286,7 +287,7 @@ def test_session_ass_style_reproduces_the_header(tmp_path):
   ass = next(p for p in session.reexport(media, sess) if p.suffix == ".ass")
   head = ass.read_text(encoding="utf-8").split("[Events]")[0]
   assert "Style: Default,Meiryo,40," in head
-  assert ",100,100,0,0,3,5,1,8,60,60," in head
+  assert f",100,100,0,0,3,5,{export_mod.ASS_SHADOW},8,100,100," in head
 
 def test_translations_round_trip_and_reach_the_ass(tmp_path):
   media = _media(tmp_path)
