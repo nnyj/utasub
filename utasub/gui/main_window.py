@@ -19,7 +19,7 @@ from .playback import PlaybackMixin
 from .region_list import RegionListMixin
 from .timeline import TimelinePanel
 from .log import LogDock, install_tee, uninstall_tee
-from .util import install_shift_hscroll
+from .util import human_size, install_shift_hscroll
 from .workers import (
   _FinalizeWorker, _AlignRegionWorker, _PrepareWorker, _EmbedWorker,
   _SetlistAssignWorker,
@@ -443,8 +443,15 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     listing = "\n".join(f.name for f in targets[:40])
     if len(targets) > 40:
       listing += f"\n... (+{len(targets) - 40} more)"
+    total = 0
+    for f in targets:
+      try:
+        total += f.stat().st_size
+      except OSError:
+        pass
     reply = QMessageBox.question(
-      self, "Delete stray files", f"Delete {len(targets)} file(s)?\n\n{listing}",
+      self, "Delete stray files",
+      f"Delete {len(targets)} file(s), {human_size(total)}?\n\n{listing}",
       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
     if reply != QMessageBox.Yes:
       return

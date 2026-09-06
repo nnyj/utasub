@@ -1,7 +1,7 @@
 """QAction / menu / toolbar construction for MainWindow.
 Actions the window later enables or toggles are stored on it as attributes."""
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import QToolBar, QMessageBox
 
 from . import theme
@@ -57,6 +57,15 @@ def _annotate_shortcuts(win):
     tip = act.toolTip() or act.text()
     if key and tip and key not in tip:
       act.setToolTip(f"{tip}  ({key})")
+
+def _open_cache_folder():
+  """File > Open cache folder: reveal the stem cache in the OS file browser."""
+  from ..core.align import stem_cache_dir
+  QDesktopServices.openUrl(QUrl.fromLocalFile(str(stem_cache_dir())))
+
+def _open_settings(win):
+  from .settings_dialog import SettingsDialog
+  SettingsDialog(win).exec()
 
 def build_actions(win):
   """Create every action, the menu bar and the icon toolbar for `win`."""
@@ -215,6 +224,14 @@ def build_actions(win):
   cleanup_act.triggered.connect(win._on_cleanup)
   win._cleanup_act = cleanup_act
 
+  cache_act = QAction("Open cache folder", win)
+  cache_act.setToolTip("Show the vocal-stem cache in the file browser")
+  cache_act.triggered.connect(lambda: _open_cache_folder())
+
+  settings_act = QAction("Settings...", win)
+  settings_act.setToolTip("Stem cache, lyrics library and HF model folders")
+  settings_act.triggered.connect(lambda: _open_settings(win))
+
   # --- menu bar ---
   mb = win.menuBar()
   file_menu = mb.addMenu("File")
@@ -227,6 +244,7 @@ def build_actions(win):
   file_menu.addAction(win._embed_act)
   file_menu.addSeparator()
   file_menu.addAction(cleanup_act)
+  file_menu.addAction(cache_act)
   file_menu.addSeparator()
   file_menu.addAction(exit_act)
 
@@ -238,6 +256,8 @@ def build_actions(win):
   edit_menu.addAction(del_act)
   edit_menu.addAction(split_act)
   edit_menu.addAction(merge_act)
+  edit_menu.addSeparator()
+  edit_menu.addAction(settings_act)
 
   align_menu = mb.addMenu("Align")
   align_menu.addAction(win._align_region_act)

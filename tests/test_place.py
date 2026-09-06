@@ -65,7 +65,7 @@ def _patch_fa(monkeypatch, align_fn, available_fn=_mock_fa_available):
 
 # --- warp fit ---
 
-def test_warp_single_segment(monkeypatch):
+def test_steady_offset_fits_one_segment(monkeypatch):
   """Steady offset: one segment, LRC intervals reproduced exactly."""
   lines = _make_lines(20, spacing=5.0)
   _patch_ctc(monkeypatch, [t + _fa_offset for t, _ in lines])
@@ -197,16 +197,37 @@ def test_warp_preserves_monotonicity():
   assert apply_warp(lrc, segs2) == [2.0, 7.0, 24.0, 30.0]
   assert warped_durations(lrc, segs2)[:3] == [5.0, 5.0, 6.0]
 
-def test_warp_rejects_without_anchors(monkeypatch):
-  """No CTC stamps: nothing to fit, so the strategy rejects."""
+def _no_ctc_stamps(monkeypatch):
   _patch_ctc(monkeypatch, [])
+
+def _ctc_unavailable(monkeypatch):
+  """torchaudio absent: no anchors possible."""
+  from utasub.core import ctc_align
+  monkeypatch.setattr(ctc_align, "ctc_available", lambda: False)
+
+LRC_WARP_REJECT_CASES = [
+  # no anchors: no CTC stamps, nothing to fit, with and without an envelope
+  (_no_ctc_stamps, True, {"use_fa": True}),
+  (_no_ctc_stamps, True, {"use_fa": True, "runs_lo": [(3.0, 60.0)]}),
+  # aligner missing
+  (_ctc_unavailable, True, {"use_fa": True, "runs_lo": [(3.0, 60.0)]}),
+  # FA off: nothing can fit a warp
+  (None, True, {"use_fa": False, "runs_lo": [(3.0, 60.0)]}),
+  # no audio at all
+  (None, False, {"use_fa": True}),
+]
+
+@pytest.mark.parametrize("setup,audio,kwargs", LRC_WARP_REJECT_CASES,
+                         ids=["no_anchors", "no_anchors_runs", "no_ctc",
+                              "no_fa", "no_audio"])
+def test_lrc_warp_rejects_and_the_chain_falls_through(monkeypatch, setup, audio,
+                                                      kwargs):
+  if setup:
+    setup(monkeypatch)
   from utasub.core.place import _lrc_warp
   lines = _make_lines(12, spacing=5.0)
-  segments = _make_segments(lines)
-  audio = _fake_audio(120.0)
-  assert _lrc_warp(lines, segments, audio, use_fa=True) is None
-  assert _lrc_warp(lines, segments, audio, use_fa=True,
-                   runs_lo=[(3.0, 60.0)]) is None
+  assert _lrc_warp(lines, _make_segments(lines),
+                   _fake_audio(120.0) if audio else None, **kwargs) is None
 
 def test_lrc_warp_needs_no_transcript(monkeypatch):
   """Global pass takes no seed: region with no usable transcript still places."""
@@ -217,28 +238,6 @@ def test_lrc_warp_needs_no_transcript(monkeypatch):
                      runs_lo=[(4.0, 60.0)])
   assert result is not None, "no-transcript region rejected"
   assert result[2]["strategy"] == "lrc_warp"
-
-def test_lrc_warp_rejects_without_the_ctc_aligner(monkeypatch):
-  """torchaudio absent: no anchors possible, chain falls through."""
-  from utasub.core import ctc_align
-  monkeypatch.setattr(ctc_align, "ctc_available", lambda: False)
-  from utasub.core.place import _lrc_warp
-  lines = _make_lines(12, spacing=5.0)
-  assert _lrc_warp(lines, _make_segments(lines), _fake_audio(120.0),
-                   use_fa=True, runs_lo=[(3.0, 60.0)]) is None
-
-def test_lrc_warp_needs_fa(monkeypatch):
-  """FA off: nothing can fit a warp, chain falls through."""
-  from utasub.core.place import _lrc_warp
-  lines = _make_lines(12, spacing=5.0)
-  assert _lrc_warp(lines, _make_segments(lines), _fake_audio(120.0),
-                   use_fa=False, runs_lo=[(3.0, 60.0)]) is None
-
-def test_no_audio_skips_lrc_warp():
-  """_lrc_warp returns None when no audio available."""
-  from utasub.core.place import _lrc_warp
-  lines = _make_lines(10, spacing=5.0)
-  assert _lrc_warp(lines, _make_segments(lines), None, use_fa=True) is None
 
 def test_chain_fallthrough(monkeypatch):
   """lrc_warp wins when it fits; chain falls to coarse_fa when it can't;

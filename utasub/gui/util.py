@@ -7,6 +7,16 @@ def settings():
   values live in session; this holds defaults for files without one."""
   return QSettings("utasub", "utasub")
 
+def human_size(n_bytes):
+  """Byte count as a short human string: B, then KB/MB/GB with one decimal."""
+  if n_bytes < 1024:
+    return f"{int(n_bytes)} B"
+  n = n_bytes / 1024
+  for unit in ("KB", "MB", "GB"):
+    if n < 1024 or unit == "GB":
+      return f"{n:.1f} {unit}"
+    n /= 1024
+
 def _shift_hscroll(view, ev):
   """Shift+wheel → horizontal scroll (Qt has no built-in mapping).
   view: any QAbstractScrollArea. Returns True when handled."""

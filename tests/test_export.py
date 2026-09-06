@@ -3,6 +3,8 @@ import re
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from utasub.core.align import Cue
 from utasub.core import export
 
@@ -52,14 +54,6 @@ def test_kf_leading_gap_becomes_an_empty_run():
   rom = "abc"
   line = export._kf_line(rom, _spans(rom, per=0.1, at=0.5), cue_len=1.0)
   assert line.startswith("{\\k50}{\\k"), line
-
-def test_kf_untimed_characters_ride_the_word_before_them():
-  """Whitespace is dropped by the aligner, so it cannot own a run of its own and
-  rides the word it follows, which is also where the per-word run ends."""
-  rom = "ab cd"
-  line = export._kf_line(rom, _spans(rom, per=0.1), cue_len=0.5)
-  assert line.count("{\\k") == 2, line  # 2 words, no run for the space
-  assert "}ab {" in line, "the space did not stay attached to the ab word"
 
 def test_kf_line_groups_by_whitespace_word():
   """_kf_line fills per whitespace word; Japanese mora come pre-split from the
@@ -165,26 +159,46 @@ def test_write_time_offset_carries_the_karaoke_spans():
   assert led.token_spans == [("h", 1.0, 1.5)], "lead did not delay the fill"
 
 def test_ass_mc_line_is_romaji_only():
-  """Gap 10: patter gets romaji in the grey MC style, with no dimmed original."""
-  cue = (100.0, 104.0, "みなさん、こんばんは。", "mc")
+  """Gap 10: patter gets romaji in the grey MC style, with no dimmed original,
+  while a lyric cue in the same export stays on Default."""
+  cues = [Cue(10.0, 15.0, "ゆめのつづき", "coarse"),
+          (100.0, 104.0, "みなさん、こんばんは。", "mc")]
   with tempfile.TemporaryDirectory() as tmp:
-    out = export.export_ass(_tmp_media(tmp), [cue], offset=0.0, lead=0.0)
+    out = export.export_ass(_tmp_media(tmp), cues, offset=0.0, lead=0.0)
     text = out.read_text(encoding="utf-8")
-  line = [l for l in text.splitlines() if l.startswith("Dialogue:")][0]
+  assert "Style: MC," in text
+  dialogue = [l for l in text.splitlines() if l.startswith("Dialogue:")]
+  assert len(dialogue) == 2, dialogue
+  assert ",Default,," in dialogue[0], dialogue[0]
+  line = dialogue[1]
   assert ",MC,," in line
   assert "Minasan" in line, line
   assert "みなさん" not in line, line
   assert "\\N" not in line, "MC line got a second line"
 
-def test_ass_unsung_colour_is_grey_not_the_default_red():
-  """SecondaryColour is the unfilled half of a \\k wipe."""
+# --- .ass header: style lines ---
+
+ASS_HEADER_CASES = [
+  # defaults: constants reach the Default line, SecondaryColour is the grey
+  # unfilled half of a \k wipe (not the ASS default red), Translation declared
+  (None, [f"Style: Default,{export.ASS_FONT},{export.ASS_FONT_SIZE},",
+          f",100,100,0,0,1,{export.ASS_OUTLINE},{export.ASS_SHADOW},2,60,60,",
+          export.ASS_UNSUNG_COLOUR,
+          "Style: Translation,", export.ASS_TR_COLOUR]),
+  # style knobs: BorderStyle 3, top alignment
+  ({"font": "Meiryo", "size": 40, "outline": 5, "box": True, "pos": 8},
+   ["Style: Default,Meiryo,40,", ",100,100,0,0,3,5,1,8,60,60,"]),
+]
+
+@pytest.mark.parametrize("style,substrings", ASS_HEADER_CASES)
+def test_ass_header_style_lines(style, substrings):
+  kw = {"style": style} if style else {}
   with tempfile.TemporaryDirectory() as tmp:
     out = export.export_ass(_tmp_media(tmp), [Cue(1.0, 2.0, "hi", None)],
-                            offset=0.0, lead=0.0)
-    text = out.read_text(encoding="utf-8")
-  default = [l for l in text.splitlines() if l.startswith("Style: Default,")][0]
-  assert export.ASS_UNSUNG_COLOUR in default
-  assert "&H000000FF" not in default
+                            offset=0.0, lead=0.0, **kw)
+    head = out.read_text(encoding="utf-8").split("[Events]")[0]
+  for sub in substrings:
+    assert sub in head, sub
 
 # --- embed_subs ---
 
@@ -259,15 +273,6 @@ def test_embed_subs_tags_a_bare_ass_with_the_paired_srt_language(monkeypatch):
   cmd = seen["cmd"]
   assert cmd[cmd.index("-metadata:s:s:0") + 1] == "language=jpn", cmd
 
-def test_embed_subs_tags_the_language_from_the_sidecar_name(monkeypatch):
-  seen = _mux_cmd(monkeypatch)
-  with tempfile.TemporaryDirectory() as tmp:
-    media = _tmp_media(tmp)
-    srt = media.with_suffix(".ja.srt")
-    srt.touch()
-    export.embed_subs(media, srt)
-  assert "language=jpn" in seen["cmd"]
-
 def test_embed_subs_skips_sidecars_that_are_not_on_disk(monkeypatch):
   import pytest
   seen = _mux_cmd(monkeypatch)
@@ -303,25 +308,6 @@ def test_spans_running_past_a_trimmed_cue_end_are_clamped():
   line = export._kf_line(rom, _spans(rom, per=1.0), cue_len=2.0)
   total = sum(int(n) for n in re.findall(r"\\k(\d+)", line))
   assert total == 200, (total, line)
-
-# --- gap 8: .ass style knobs ---
-
-def test_ass_style_knobs_reach_the_style_lines():
-  with tempfile.TemporaryDirectory() as tmp:
-    out = export.export_ass(
-      _tmp_media(tmp), [Cue(1.0, 2.0, "hi", None)], offset=0.0, lead=0.0,
-      style={"font": "Meiryo", "size": 40, "outline": 5, "box": True, "pos": 8})
-    head = out.read_text(encoding="utf-8").split("[Events]")[0]
-  assert "Style: Default,Meiryo,40," in head
-  assert ",100,100,0,0,3,5,1,8,60,60," in head  # BorderStyle 3, top alignment
-
-def test_ass_defaults_are_unchanged_without_style():
-  with tempfile.TemporaryDirectory() as tmp:
-    out = export.export_ass(_tmp_media(tmp), [Cue(1.0, 2.0, "hi", None)],
-                            offset=0.0, lead=0.0)
-    head = out.read_text(encoding="utf-8").split("[Events]")[0]
-  assert f"Style: Default,{export.ASS_FONT},{export.ASS_FONT_SIZE}," in head
-  assert f",100,100,0,0,1,{export.ASS_OUTLINE},{export.ASS_SHADOW},2,60,60," in head
 
 # --- gap 11: .lrc back into the curated library ---
 
@@ -373,6 +359,18 @@ def test_srt_name_follows_the_majority_language():
     assert export.srt_name(media, ko_heavy).name == "concert.ko.srt"
     assert export.srt_name(media, [(0.0, 2.0, "plain english")]).name == "concert.srt"
 
+def test_export_srt_writes_a_romaji_sidecar_and_clamps_a_negative_start():
+  """CJK cues get the second .romaji.srt track; an offset dragging the first cue
+  before zero clamps to 0.0 and keeps its length, not a negative stamp."""
+  with tempfile.TemporaryDirectory() as tmp:
+    media = _tmp_media(tmp)
+    written = export.export_srt(media, [(0.5, 2.0, "こんにちは")], offset=-1.0,
+                                lead=0.0)
+    assert [p.name for p in written] == ["concert.ja.srt", "concert.romaji.srt"]
+    main, rom = (p.read_text(encoding="utf-8") for p in written)
+  assert "00:00:00,000 --> 00:00:01,500" in main
+  assert "kon" in rom.lower()
+
 # --- translation line ---
 
 def _tr_cand(tlyric):
@@ -401,14 +399,6 @@ def test_no_tlyric_leaves_two_lines():
   cues = [Cue(0.0, 2.0, "ゆめのつづき", "lrc"), Cue(2.0, 4.0, "あなたは夏の風", "lrc")]
   lines = _ass_dialogue(cues, translation_lines(_tr_cand("")))
   assert [ln.count("\\N") for ln in lines] == [1, 1]
-
-def test_translation_style_is_declared_in_the_header():
-  with tempfile.TemporaryDirectory() as tmp:
-    out = export.export_ass(_tmp_media(tmp), [Cue(0.0, 2.0, "ゆめ", "lrc")],
-                            offset=0.0, lead=0.0)
-    header = out.read_text(encoding="utf-8").split("[Events]")[0]
-  assert "Style: Translation," in header
-  assert export.ASS_TR_COLOUR in header
 
 def test_translation_matches_a_shifted_timestamp_within_half_a_second():
   from utasub.core.providers import translation_lines

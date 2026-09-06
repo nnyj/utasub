@@ -180,6 +180,13 @@ def main():
                            "lyrics, when the provider carries one (default OFF)")
   args = parser.parse_args()
 
+  if args.gui or args.timeline:
+    # GUI only: the Settings dialog's lyrics / HF paths must reach os.environ
+    # before lyrickit or huggingface is first imported. Headless runs keep the
+    # environment exactly as the shell gave it.
+    from .core.paths import apply_path_env
+    apply_path_env()
+
   export_mod.SRT_OFFSET_S = args.offset  # process-wide export defaults
   export_mod.SRT_LEAD_S = args.lead
   export_mod.ASS_STYLE = {"font": args.ass_font, "size": args.ass_size,

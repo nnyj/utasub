@@ -13,7 +13,7 @@ from .timeline_util import (
   romaji_for, find_onsets, UndoStack, fmt_tick, TICK_STEPS,
   DRAG_NONE, DRAG_MOVE, DRAG_LEFT, DRAG_RIGHT, DRAG_PAN, DRAG_REGION,
   EDGE_THRESH_PX, NEIGHBOR_SNAP_PX, REGION_THRESH_PX, MIN_REGION_S,
-  MIN_CUE_LEN_S, MIN_CUE_GAP_S, ONSET_SNAP_S, LABEL_MIN_PX, LABEL_ROMAJI_PX,
+  MIN_CUE_LEN_S, MIN_CUE_GAP_S, ONSET_SNAP_S, LABEL_ROMAJI_PX,
 )
 
 def as_cue(c, default_conf=None):
@@ -921,22 +921,22 @@ class WaveformCanvas(QWidget):
     p.setPen(QPen(border, border_w))
     p.drawRect(x1, lane_y + 1, bw, self.CUE_LANE_H - 2)
 
-    if bw <= LABEL_MIN_PX:
-      return
     fm = p.fontMetrics()
-    avail = bw - 8
     rom = romaji_for(c.text) if bw > LABEL_ROMAJI_PX else ""
     if rom:
       baseline = lane_y + 4 + fm.ascent()
     else:
       baseline = lane_y + (self.CUE_LANE_H // 2 + fm.ascent() // 2)
+    # full text clipped hard at the block edge: a narrow block still shows its
+    # first letters, an ellipsis would spend the little width there is
+    p.save()
+    p.setClipRect(x1 + 1, lane_y + 1, bw - 2, self.CUE_LANE_H - 2)
     p.setPen(QPen(theme.CUE_TEXT, 1))
-    p.drawText(x1 + 4, baseline,
-               fm.elidedText(c.text, Qt.ElideRight, avail))
+    p.drawText(x1 + 3, baseline, c.text)
     if rom:
       p.setPen(QPen(theme.CUE_ROMAJI, 1))
-      p.drawText(x1 + 4, baseline + fm.height(),
-                 fm.elidedText(rom, Qt.ElideRight, avail))
+      p.drawText(x1 + 3, baseline + fm.height(), rom)
+    p.restore()
 
   def paintEvent(self, ev):
     p = QPainter(self)

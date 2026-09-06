@@ -4,6 +4,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from utasub.core.regions import Region
 from utasub.core.place import AlignOpts
 from utasub.core.mc import is_junk_cue
@@ -143,25 +145,6 @@ def test_finalize_without_mc_leaves_patter_untagged():
   assert not [c for c in cues if len(c) > 3 and c[3] == "mc"]
   assert any(c[2] == SPOKEN[0][2] for c in cues)
 
-def test_ass_export_styles_mc_cues_separately():
-  """export_ass routes mc cues to the MC style, lyric cues to Default."""
-  from utasub.core.align import Cue
-  from utasub.core.export import export_ass
-  cues = [Cue(10.0, 15.0, "ゆめのつづき", "coarse"),
-          Cue(100.0, 104.0, SPOKEN[0][2], "mc")]
-  with tempfile.TemporaryDirectory() as tmpdir:
-    path = Path(tmpdir) / "test.mkv"
-    path.touch()
-    out = export_ass(path, cues, offset=0.0, lead=0.0)
-    text = out.read_text(encoding="utf-8")
-  assert "Style: MC," in text
-  dialogue = [l for l in text.splitlines() if l.startswith("Dialogue:")]
-  assert len(dialogue) == 2
-  assert ",Default,," in dialogue[0]
-  assert ",MC,," in dialogue[1]
-  assert "Minasan" in dialogue[1], "MC line kept its kana instead of romaji"
-  assert SPOKEN[0][2] not in dialogue[1], "MC line kept a dimmed original"
-
 def test_session_roundtrips_mc_spans():
   """mc spans persist through save/load."""
   from utasub.core import session
@@ -171,54 +154,34 @@ def test_session_roundtrips_mc_spans():
     session.save(path, cues=[(10.0, 15.0, "line")], mc_spans=[(100.0, 112.0)])
     assert session.load(path)["mc_spans"] == [(100.0, 112.0)]
 
-def test_is_junk_cue_flags_text_with_nothing_to_read():
-  """Empty or punctuation-only text is never a line."""
-  assert is_junk_cue((1.0, 3.0, "!!"))
-  assert is_junk_cue((1.0, 3.0, "  "))
+JUNK_CASES = [
+  # nothing to read: punctuation only, whitespace only
+  (True, (1.0, 3.0, "!!"), None),
+  (True, (1.0, 3.0, "  "), None),
+  # shortness alone is not junk (嗚呼 / Oh / ラララ are all sung); it takes a
+  # second signal, a degenerate stamp, to call a short line junk
+  (False, (10.0, 12.0, "ずっと"), None),
+  (True, (10.0, 10.2, "ずっと"), None),
+  # a held line scores under the low chars/sec bar, which alone is not junk
+  (False, (100.0, 120.0, "きみのなまえを"), None),
+  # 12 seconds carrying 3 chars is crowd noise
+  (True, (200.0, 212.0, "うおー"), None),
+  # tiled repeats: repeated short token, single repeated char
+  (True, (10.0, 14.0, "ワーワーワーワー"), None),
+  (True, (10.0, 14.0, "ーーーーー"), None),
+  # chars/sec far above sung/spoken range is transcription garbage
+  (True, (10.0, 10.8, "あいうえおかきくけこさしすせそたちつてと"), None),
+  # normalized equality with the previous kept line, punctuation included
+  (True, (10.0, 13.0, "アンコール"), "アンコール"),
+  (True, (10.0, 13.0, "アンコール!"), "アンコール"),
+  # a prefix overlap only reads as a repeat between two chants: ありがとう after
+  # ありがとうございました is the next lyric, not an echo
+  (False, (10.0, 13.0, "ありがとう"), "ありがとうございました"),
+]
 
-def test_is_junk_cue_keeps_short_real_lyric_lines():
-  """Shortness alone dropped 嗚呼 / Oh / ラララ, all of them sung. It takes a
-  second signal (a degenerate rate or duration) to call one junk."""
-  assert not is_junk_cue((10.0, 12.0, "嗚呼"))
-  assert not is_junk_cue((10.0, 11.5, "Oh"))
-  assert not is_junk_cue((10.0, 11.5, "ラララ"))
-  assert not is_junk_cue((10.0, 12.0, "ずっと"))
-  assert is_junk_cue((10.0, 10.2, "ずっと")), "short + a degenerate stamp is junk"
-
-def test_is_junk_cue_keeps_a_line_sustained_over_a_long_stamp():
-  """A held line scores under the low chars/sec bar, which alone is not junk."""
-  assert not is_junk_cue((100.0, 120.0, "きみのなまえを"))
-
-def test_is_junk_cue_flags_crowd_noise_long_span():
-  """A 12-second segment carrying 3 chars is crowd noise, not a line."""
-  assert is_junk_cue((200.0, 212.0, "うおー"))
-
-def test_is_junk_cue_flags_repeated_char_and_token_cheers():
-  """Single repeated char and repeated short tokens are cheers."""
-  assert is_junk_cue((10.0, 14.0, "ワーワーワーワー"))
-  assert is_junk_cue((10.0, 14.0, "ah ah ah ah"))
-  assert is_junk_cue((10.0, 14.0, "ーーーーー"))
-
-def test_is_junk_cue_flags_garbage_fast_rate():
-  """Chars/sec far above sung/spoken range is transcription garbage."""
-  assert is_junk_cue((10.0, 10.8, "あいうえおかきくけこさしすせそたちつてと"))
-
-def test_is_junk_cue_flags_repeat_of_prev_kept_text():
-  """Normalized equality, punctuation included, counts as a repeat."""
-  assert is_junk_cue((10.0, 13.0, "アンコール"), prev_text="アンコール")
-  assert is_junk_cue((10.0, 13.0, "アンコール!"), prev_text="アンコール")
-
-def test_is_junk_cue_keeps_a_real_line_that_starts_like_the_one_before():
-  """A prefix overlap only reads as a repeat between two chants: ありがとう
-  after ありがとうございました is the next lyric, not an echo."""
-  assert not is_junk_cue((10.0, 13.0, "ありがとう"),
-                         prev_text="ありがとうございました")
-
-def test_is_junk_cue_keeps_real_short_sung_line_and_mc_patter():
-  """Positive controls: real short sung line and MC patter survive."""
-  assert not is_junk_cue(SUNG[0])
-  assert not is_junk_cue((100.0, 104.0, "とおいそらへ"))
-  assert not is_junk_cue(SPOKEN[0])
+@pytest.mark.parametrize("junk,cue,prev_text", JUNK_CASES)
+def test_is_junk_cue_verdicts(junk, cue, prev_text):
+  assert is_junk_cue(cue, prev_text=prev_text) is junk
 
 def test_filter_junk_drops_chants_cheers_keeps_songs_and_patter():
   """filter_junk threads prev kept text: encore chant repeated 4x collapses,

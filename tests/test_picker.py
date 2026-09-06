@@ -1,4 +1,6 @@
 """Unit tests for PickerPanel (offscreen via conftest QApplication)."""
+import pytest
+
 from utasub.core.providers import Candidate
 from utasub.gui.picker import PickerPanel, build_alternates
 
@@ -23,11 +25,13 @@ def _panel(scored=None):
     p.populate(scored)
   return p
 
-def test_populate_adds_scored_rows_plus_paste_row():
-  """Table has N scored rows + 1 paste-row."""
-  scored = _fake_scored()
-  p = _panel(scored)
-  assert p.table.rowCount() == len(scored) + 1
+@pytest.mark.parametrize("n", [0, 3])
+def test_populate_adds_scored_rows_plus_editable_paste_row(n):
+  """Table has N scored rows + 1 paste-row, incl. the zero-candidate case."""
+  p = _panel(_fake_scored()[:n])
+  assert p.table.rowCount() == n + 1
+  p.table.selectRow(n)
+  assert not p.preview.isReadOnly()
 
 def test_prefill_alternates_from_tags():
   """build_alternates surfaces title + split artists from tags; panel binds
@@ -67,13 +71,6 @@ def test_selecting_row_returns_that_candidate():
   p.table.selectRow(1)
   ch = p.chosen_candidate()
   assert ch is not None and ch[1].title == "OK Match"
-
-def test_empty_candidates_shows_only_paste_row():
-  """Zero candidates: paste-row only, editable."""
-  p = _panel([])
-  assert p.table.rowCount() == 1
-  p.table.selectRow(0)
-  assert not p.preview.isReadOnly()
 
 def test_row_change_only_previews_and_apply_button_follows_selection():
   """Row selection previews only; nothing applies until button fires.

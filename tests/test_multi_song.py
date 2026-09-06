@@ -30,14 +30,12 @@ def _make_long_segments():
       segs.append((float(t), float(t + 5), f"word at {t}"))
   return segs
 
-def _make_candidate(title, sim=0.5):
-  c = Candidate(title=title, album="Album", artist="Artist", source="NetEase",
-                duration_ms=240000, lrc="[00:01.00] line one\n[00:05.00] line two")
-  return (sim, c)
-
-def _make_cand(title, lrc="[00:01.00] line"):
-  return Candidate(title=title, album="", artist="Art", source="NetEase",
+def _make_cand(title, lrc="[00:01.00] line one\n[00:05.00] line two"):
+  return Candidate(title=title, album="Album", artist="Artist", source="NetEase",
                    duration_ms=240000, lrc=lrc)
+
+def _mock_run_chain(lines, segs, audio, opts=None, **kw):
+  return list(segs), None, {"strategy": "mock"}
 
 def _fetch_by_query(titles):
   """Mocks fetch_from_providers: returns track whose title is in query.
@@ -153,7 +151,7 @@ def _finalize(regions, assignments, strategy="mock", export=True, tmpdir=None,
 def test_finalize_low_confidence_guard(sim, user_picked, guarded):
   """Low-confidence guard replaces weak coarse_envelope placement with raw ASR,
   unless candidate was user-picked."""
-  _, cand = _make_candidate("Song A", sim)
+  cand = _make_cand("Song A")
   cand.user_picked = user_picked
   with tempfile.TemporaryDirectory() as tmpdir:
     _, metas = _finalize([Region(10, 250)], [(sim, cand)],
@@ -164,7 +162,7 @@ def test_finalize_low_confidence_guard(sim, user_picked, guarded):
 def test_finalize_export_false_runs_chain_per_assigned_region_and_writes_nothing():
   """One run_chain call per assigned region; export=False writes no SRT/session."""
   regions = [Region(10, 250), Region(300, 550)]
-  assignments = [_make_candidate("Song A", 0.6), None]
+  assignments = [(0.6, _make_cand("Song A")), None]
   calls = []
   with tempfile.TemporaryDirectory() as tmpdir:
     _, metas = _finalize(regions, assignments, export=False, tmpdir=tmpdir,
@@ -178,29 +176,22 @@ def test_single_region_align_reports_its_region_without_export():
   """Aligns one region, writes nothing."""
   from utasub.core.multi_song import _finalize_single_region
   region = Region(300, 550)
-  segments = _make_segments()
-
-  def mock_run_chain(lines, segs, audio, opts=None, **kw):
-    return list(segs), None, {"strategy": "mock"}
-
-  with tempfile.TemporaryDirectory() as tmpdir:
-    with patch("utasub.core.place.run_chain", mock_run_chain), \
-         patch("lyrickit.classify_lines", return_value=["sung", "sung"]):
-      cues, meta = _finalize_single_region(
-        segments, None, region, 1, _make_candidate("Song A", 0.6),
-        opts=AlignOpts(use_fa=False))
-    assert all(300 <= c[0] <= 550 for c in cues)
-    assert meta.get("region_idx") == 1
-    assert not list(Path(tmpdir).glob("*.srt"))
+  with patch("utasub.core.place.run_chain", _mock_run_chain), \
+       patch("lyrickit.classify_lines", return_value=["sung", "sung"]):
+    cues, meta = _finalize_single_region(
+      _make_segments(), None, region, 1, (0.6, _make_cand("Song A")),
+      opts=AlignOpts(use_fa=False))
+  assert all(300 <= c[0] <= 550 for c in cues)
+  assert meta.get("region_idx") == 1
 
 def test_pool_fallback_rejects_below_threshold():
   """Artist-pool fallback leaves regions unassigned when best sim < POOL_SIM_THRESHOLD."""
   from utasub.cli import _multi_song_prepare
   segments = _make_long_segments()
-  cand = _make_candidate("Noise Song", 0.4)  # below 0.55
+  cand = _make_cand("Noise Song")  # scores below the 0.55 pool threshold
 
   def mock_fetch(query, providers, fresh=False, limit=10, on_error=None):
-    return [cand[1]]
+    return [cand]
 
   with patch("utasub.core.providers.fetch_from_providers", mock_fetch), \
        patch("utasub.core.setlist.discover", return_value=([], "", "")):
@@ -216,7 +207,7 @@ def test_headless_writes_srt_and_multi_song_session():
   segments = _make_segments()
 
   def mock_fetch(query, providers, fresh=False, limit=10, on_error=None):
-    return [_make_candidate("Song A", 0.6)[1]]
+    return [_make_cand("Song A")]
 
   with tempfile.TemporaryDirectory() as tmpdir:
     path = Path(tmpdir) / "test.mkv"
@@ -308,13 +299,9 @@ def test_asr_fill_off_keeps_a_region_whose_lyrics_never_placed():
   with tempfile.TemporaryDirectory() as tmpdir:
     from utasub.core.multi_song import _multi_song_finalize
     segments = _make_segments()
-
-    def mock_run_chain(lines, segs, audio, opts=None, **kw):
-      return list(segs), None, {"strategy": "mock"}
-
     path = Path(tmpdir) / "test.mkv"
     path.touch()
-    with patch("utasub.core.place.run_chain", mock_run_chain), \
+    with patch("utasub.core.place.run_chain", _mock_run_chain), \
          patch("lyrickit.classify_lines", return_value=["sung", "sung"]):
       kept, _ = _multi_song_finalize(path, segments, None, regions, [None],
                                      romaji=False, opts=AlignOpts(use_fa=False),
@@ -339,20 +326,19 @@ def test_asr_fill_drops_junk_between_songs():
   assert "あー" not in texts
   assert len(texts) == 1
 
-def test_region_records_the_index_of_the_candidate_actually_picked():
+@pytest.mark.parametrize("with_scored,expected_idx", [
+  (True, 1),   # the winner is the runner-up by score
+  (False, 0),  # no scored list to point into
+])
+def test_region_records_the_index_of_the_candidate_actually_picked(with_scored,
+                                                                   expected_idx):
   """candidate_idx points back into the region's scored list, so it has to name
   the winner, not the top score."""
   from utasub.core.multi_song import _align_one_region
   first, second = _make_cand("A", lrc=""), _make_cand("B", lrc="")
-  scored = [(0.9, first), (0.8, second)]
+  scored = [(0.9, first), (0.8, second)] if with_scored else None
   region = Region(0.0, 60.0)
   _cues, meta = _align_one_region(region, 0, [], None, (0.8, second),
                                   AlignOpts(), scored=scored)
   assert meta["strategy"] == "parse_empty"
-  assert region.candidate_idx == 1
-
-def test_region_candidate_index_defaults_to_zero_without_a_scored_list():
-  from utasub.core.multi_song import _align_one_region
-  region = Region(0.0, 60.0)
-  _align_one_region(region, 0, [], None, (0.8, _make_cand("A", lrc="")), AlignOpts())
-  assert region.candidate_idx == 0
+  assert region.candidate_idx == expected_idx

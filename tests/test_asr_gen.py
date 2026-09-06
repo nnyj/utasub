@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from utasub.core import asr_gen
 
@@ -41,21 +42,17 @@ def _transcribe(n_chunks):
     asr_gen.transcribe("song.mkv", use_stems=False, progress=lines.append)
   return lines, captured
 
-def test_progress_one_line_per_batch():
-  """45 chunks at batch size 20 emit 3 progress lines with running counts."""
-  lines, _ = _transcribe(45)
+@pytest.mark.parametrize("n_chunks, n_lines, counts", [
+  (45, 3, ["20", "40", "45"]),   # batch size 20: two full batches plus remainder
+  (5, 1, ["5"]),                 # under batch size: single batch
+])
+def test_progress_one_line_per_batch(n_chunks, n_lines, counts):
+  """One progress line per batch, carrying running done/total counts."""
+  lines, _ = _transcribe(n_chunks)
   chunk_lines = [l for l in lines if "chunks," in l and "left" in l]
-  assert len(chunk_lines) == 3, chunk_lines
-  counts = [l.strip().split("/")[0] for l in chunk_lines]
-  assert counts == ["20", "40", "45"]
-  assert all("/45 chunks" in l for l in chunk_lines)
-
-def test_single_batch_when_under_batch_size():
-  """Fewer chunks than batch size emit exactly one progress line."""
-  lines, _ = _transcribe(5)
-  chunk_lines = [l for l in lines if "chunks," in l and "left" in l]
-  assert len(chunk_lines) == 1
-  assert "5/5 chunks" in chunk_lines[0]
+  assert len(chunk_lines) == n_lines, chunk_lines
+  assert [l.strip().split("/")[0] for l in chunk_lines] == counts
+  assert all(f"/{n_chunks} chunks" in l for l in chunk_lines)
 
 def test_segments_come_out_in_chunk_order():
   """Batched results reassemble in chunk order across batch boundaries."""
@@ -66,3 +63,28 @@ def test_segments_come_out_in_chunk_order():
   starts = [s for s, _, _ in segments]
   assert starts == sorted(starts)
   assert captured["lang"] == "ja"
+
+def _tone(seconds, sr=16000):
+  t = np.arange(int(seconds * sr)) / sr
+  return (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+
+def test_split_on_silence_cuts_at_the_gap():
+  """1s tone, 1s silence, 1s tone: two chunks, boundaries padded by 0.15s."""
+  audio = np.concatenate([_tone(1), np.zeros(16000, dtype=np.float32), _tone(1)])
+  chunks = asr_gen.split_on_silence(audio)
+  assert len(chunks) == 2, chunks
+  assert chunks[0] == pytest.approx((0.0, 1.15), abs=0.01)
+  assert chunks[1] == pytest.approx((1.85, 3.0), abs=0.01)
+
+def test_split_on_silence_returns_whole_span_when_nothing_voiced():
+  chunks = asr_gen.split_on_silence(np.zeros(32000, dtype=np.float32))
+  assert chunks == [(0.0, 2.0)]
+
+def test_group_into_segments_splits_on_word_gap():
+  """Gap wider than max_gap ends the phrase; words join with ASCII spacing."""
+  stamps = [SimpleNamespace(start_time=s, end_time=e, text=t) for s, e, t in [
+    (0.0, 0.5, "Hello"), (0.5, 1.0, "world"),
+    (2.5, 3.0, "second"), (3.0, 3.5, "phrase"),
+  ]]
+  assert asr_gen.group_into_segments(stamps) == [
+    (0.0, 1.0, "Hello world"), (2.5, 3.5, "second phrase")]

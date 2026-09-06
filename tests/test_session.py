@@ -1,15 +1,11 @@
 """Session save/load round-trip, deterministic re-export."""
-import tempfile
 import pytest
-import shutil
-from pathlib import Path
 
 from utasub.core.providers import Candidate
 from utasub.core import session
 
-def _tmp_media():
-  d = Path(tempfile.mkdtemp(prefix="utasub_test_"))
-  media = d / "test_song.mkv"
+def _media(tmp_path):
+  media = tmp_path / "test_song.mkv"
   media.write_bytes(b"\x00")
   return media
 
@@ -24,50 +20,40 @@ def _sample_candidates():
 def _sample_cues():
   return [(0.0, 2.5, "hello world"), (2.5, 5.0, "second line"), (5.0, 8.0, "third line")]
 
-def test_round_trip_preserves_all_fields():
-  media = _tmp_media()
-  try:
-    cands = _sample_candidates()
-    cues = _sample_cues()
-    session.save(media, candidates=cands, chosen_index=0,
-                 cues=cues, song_span=(0.0, 8.0), romaji=False)
-    loaded = session.load(media)
-    assert loaded is not None
-    assert loaded["schema_version"] == session.SCHEMA_VERSION
-    assert loaded["chosen_index"] == 0
-    assert len(loaded["candidates"]) == 2
-    assert loaded["candidates"][0].title == "Song A"
-    assert loaded["candidates"][1].lrc == ""
-    assert loaded["cues"] == cues
-    assert loaded["song_span"] == (0.0, 8.0)
-    assert loaded["romaji"] is False
-    assert loaded["credit_toggles"] == {}
-    assert loaded["regions"] == []
-  finally:
-    shutil.rmtree(media.parent)
+def test_round_trip_preserves_all_fields(tmp_path):
+  media = _media(tmp_path)
+  cands = _sample_candidates()
+  cues = _sample_cues()
+  session.save(media, candidates=cands, chosen_index=0,
+               cues=cues, song_span=(0.0, 8.0), romaji=False)
+  loaded = session.load(media)
+  assert loaded is not None
+  assert loaded["schema_version"] == session.SCHEMA_VERSION
+  assert loaded["chosen_index"] == 0
+  assert len(loaded["candidates"]) == 2
+  assert loaded["candidates"][0].title == "Song A"
+  assert loaded["candidates"][1].lrc == ""
+  assert loaded["cues"] == cues
+  assert loaded["song_span"] == (0.0, 8.0)
+  assert loaded["romaji"] is False
+  assert loaded["credit_toggles"] == {}
+  assert loaded["regions"] == []
 
-def test_load_missing_returns_none():
-  media = _tmp_media()
-  try:
-    assert session.load(media) is None
-  finally:
-    shutil.rmtree(media.parent)
+def test_load_missing_returns_none(tmp_path):
+  assert session.load(_media(tmp_path)) is None
 
-def test_deterministic_reexport_japanese():
+def test_deterministic_reexport_japanese(tmp_path):
   """.ja.srt, .romaji.srt and .ass byte-identical across runs."""
-  media = _tmp_media()
-  try:
-    cues = [(0.0, 3.0, "そらに浮かぶ月"), (3.0, 6.0, "風の声が聞こえる")]
-    session.save(media, cues=cues, romaji=True)
-    sess = session.load(media)
+  media = _media(tmp_path)
+  cues = [(0.0, 3.0, "そらに浮かぶ月"), (3.0, 6.0, "風の声が聞こえる")]
+  session.save(media, cues=cues, romaji=True)
+  sess = session.load(media)
 
-    bytes1 = [p.read_bytes() for p in session.reexport(media, sess)]
-    bytes2 = [p.read_bytes() for p in session.reexport(media, sess)]
-    assert len(bytes1) == len(bytes2) == 3
-    for b1, b2 in zip(bytes1, bytes2):
-      assert b1 == b2
-  finally:
-    shutil.rmtree(media.parent)
+  bytes1 = [p.read_bytes() for p in session.reexport(media, sess)]
+  bytes2 = [p.read_bytes() for p in session.reexport(media, sess)]
+  assert len(bytes1) == len(bytes2) == 3
+  for b1, b2 in zip(bytes1, bytes2):
+    assert b1 == b2
 
 # --- manual edits across a re-align ---
 
@@ -163,122 +149,86 @@ def test_added_line_is_not_duplicated_once_the_aligner_produces_it():
   out = apply_manual_edits(fresh, edits)
   assert len(out) == 2, [c.text for c in out]
 
-def test_added_survives_the_session_round_trip():
-  media = _tmp_media()
-  try:
-    edits = {"timings": [], "deleted": [],
-             "added": [{"text": "solo", "at": 5.0, "start": 5.0, "end": 6.0,
-                        "text_raw": "Solo"}]}
-    session.save(media, cues=_sample_cues(), manual_edits=edits)
-    assert session.load(media)["manual_edits"]["added"] == edits["added"]
-  finally:
-    shutil.rmtree(media.parent)
+def test_added_survives_the_session_round_trip(tmp_path):
+  media = _media(tmp_path)
+  edits = {"timings": [], "deleted": [],
+           "added": [{"text": "solo", "at": 5.0, "start": 5.0, "end": 6.0,
+                      "text_raw": "Solo"}]}
+  session.save(media, cues=_sample_cues(), manual_edits=edits)
+  assert session.load(media)["manual_edits"]["added"] == edits["added"]
 
-def test_manual_edits_always_load_with_all_three_lists():
+def test_manual_edits_always_load_with_all_three_lists(tmp_path):
   """Callers index the three keys directly, an old session has none of them."""
-  media = _tmp_media()
-  try:
-    session.save(media, cues=_sample_cues(), manual_edits={"timings": []})
-    got = session.load(media)["manual_edits"]
-    assert set(got) >= {"timings", "deleted", "added"}
-  finally:
-    shutil.rmtree(media.parent)
+  media = _media(tmp_path)
+  session.save(media, cues=_sample_cues(), manual_edits={"timings": []})
+  got = session.load(media)["manual_edits"]
+  assert set(got) >= {"timings", "deleted", "added"}
 
 # --- gap 5 / gap 3: per-cue CTC evidence ---
 
-def test_cue_score_and_token_spans_round_trip():
-  from utasub.core.align import Cue
-  media = _tmp_media()
-  try:
-    cue = Cue(1.0, 3.0, "hello", "lrc")
-    cue.score = 0.82
-    cue.token_spans = [("h", 0.0, 0.1), ("i", 0.1, 0.25)]
-    session.save(media, cues=[cue, Cue(4.0, 5.0, "plain", "lrc")])
-    loaded = session.load(media)["cues"]
-    assert loaded[0].score == 0.82
-    assert loaded[0].token_spans == [["h", 0.0, 0.1], ["i", 0.1, 0.25]]
-    assert getattr(loaded[1], "score", None) is None, "extras leaked onto a bare cue"
-  finally:
-    shutil.rmtree(media.parent)
-
-def test_cue_extras_do_not_widen_the_serialized_cue():
+def test_cue_extras_do_not_widen_the_serialized_cue(tmp_path):
   """Extras ride a parallel list, so the cue rows stay 3/4 elements wide."""
   import json
   from utasub.core.align import Cue
-  media = _tmp_media()
-  try:
-    cue = Cue(1.0, 3.0, "hello", "lrc")
-    cue.score = 0.5
-    session.save(media, cues=[cue])
-    raw = json.loads(session.session_path(media).read_text(encoding="utf-8"))
-    assert raw["cues"] == [[1.0, 3.0, "hello", "lrc"]]
-    assert raw["cue_meta"] == [{"score": 0.5}]
-  finally:
-    shutil.rmtree(media.parent)
+  media = _media(tmp_path)
+  cue = Cue(1.0, 3.0, "hello", "lrc")
+  cue.score = 0.5
+  session.save(media, cues=[cue])
+  raw = json.loads(session.session_path(media).read_text(encoding="utf-8"))
+  assert raw["cues"] == [[1.0, 3.0, "hello", "lrc"]]
+  assert raw["cue_meta"] == [{"score": 0.5}]
 
 # --- gap 12: media stored as a basename ---
 
-def test_media_is_stored_as_a_basename():
+def test_media_is_stored_as_a_basename(tmp_path):
   import json
-  media = _tmp_media()
-  try:
-    session.save(media, cues=_sample_cues())
-    raw = json.loads(session.session_path(media).read_text(encoding="utf-8"))
-    assert raw["media"] == "test_song.mkv", raw["media"]
-  finally:
-    shutil.rmtree(media.parent)
+  media = _media(tmp_path)
+  session.save(media, cues=_sample_cues())
+  raw = json.loads(session.session_path(media).read_text(encoding="utf-8"))
+  assert raw["media"] == "test_song.mkv", raw["media"]
 
-def test_renamed_media_still_loads_and_says_so(capsys):
+def test_renamed_media_still_loads_and_says_so(tmp_path, capsys):
   """The ASR block and the manual edits are the expensive half; a rename must
   warn, not orphan them."""
-  media = _tmp_media()
-  try:
-    session.save(media, cues=_sample_cues())
-    moved = media.parent / "renamed.mkv"
-    session.session_path(media).rename(session.session_path(moved))
-    moved.write_bytes(b"\x00")
-    loaded = session.load(moved)
-    assert loaded is not None and len(loaded["cues"]) == 3
-    assert "test_song" in capsys.readouterr().out
-  finally:
-    shutil.rmtree(media.parent)
+  media = _media(tmp_path)
+  session.save(media, cues=_sample_cues())
+  moved = media.parent / "renamed.mkv"
+  session.session_path(media).rename(session.session_path(moved))
+  moved.write_bytes(b"\x00")
+  loaded = session.load(moved)
+  assert loaded is not None and len(loaded["cues"]) == 3
+  assert "test_song" in capsys.readouterr().out
 
 # --- gap 12: the write must not truncate on a crash ---
 
-def test_write_is_atomic_and_leaves_no_temp_file(monkeypatch):
+def test_write_is_atomic_and_leaves_no_temp_file(tmp_path, monkeypatch):
   def boom(*_a):
     raise OSError("disk full")
 
-  media = _tmp_media()
-  try:
-    session.save(media, cues=_sample_cues())
-    before = session.session_path(media).read_bytes()
-    monkeypatch.setattr(session.os, "replace", boom)
-    with pytest.raises(OSError):
-      session.save(media, cues=[(0.0, 1.0, "clobbered")])
-    assert session.session_path(media).read_bytes() == before, "session truncated"
-    # the glob only means anything after a write that failed: before one, there
-    # is nothing to leave behind
-    assert not list(media.parent.glob("*.tmp")), "temp file left behind"
-  finally:
-    shutil.rmtree(media.parent)
+  media = _media(tmp_path)
+  session.save(media, cues=_sample_cues())
+  before = session.session_path(media).read_bytes()
+  monkeypatch.setattr(session.os, "replace", boom)
+  with pytest.raises(OSError):
+    session.save(media, cues=[(0.0, 1.0, "clobbered")])
+  assert session.session_path(media).read_bytes() == before, "session truncated"
+  # the glob only means anything after a write that failed: before one, there
+  # is nothing to leave behind
+  assert not list(media.parent.glob("*.tmp")), "temp file left behind"
 
-def test_two_media_files_sharing_a_stem_are_reported(capsys):
+def test_two_media_files_sharing_a_stem_are_reported(tmp_path, capsys):
   """song.mkv and song.flac in one folder map to one session file; the stored
   name is the only thing that says which of them wrote it."""
-  media = _tmp_media()
-  try:
-    session.save(media, cues=_sample_cues())
-    sibling = media.with_suffix(".flac")
-    sibling.write_bytes(b"\x00")
-    session.load(sibling)
-    assert "test_song.mkv" in capsys.readouterr().out, "stem collision went unsaid"
-  finally:
-    shutil.rmtree(media.parent)
+  media = _media(tmp_path)
+  session.save(media, cues=_sample_cues())
+  sibling = media.with_suffix(".flac")
+  sibling.write_bytes(b"\x00")
+  session.load(sibling)
+  assert "test_song.mkv" in capsys.readouterr().out, "stem collision went unsaid"
 
 # --- per-cue extras ---
 
-def test_cue_extras_survive_every_rebuild():
+def test_cue_extras_survive_every_rebuild(tmp_path):
   """score and token_spans are the whole karaoke + Conf feature. Every rebuild
   site goes through dataclasses.replace, so they have to be Cue fields."""
   from dataclasses import replace
@@ -288,17 +238,15 @@ def test_cue_extras_survive_every_rebuild():
   moved = replace(cue, start=20.0, end=23.0)
   assert (moved.score, moved.token_spans) == (-0.4, [("a", 0.0, 0.5)])
 
-  media = _tmp_media()
-  try:
-    session.save(media, cues=[cue])
-    back = session.load(media)["cues"][0]
-    assert back.score == -0.4 and back.token_spans == [["a", 0.0, 0.5]]
-    edits = {"timings": [{"text": "line", "at": 10.0, "start": 11.0, "end": 14.0}]}
-    retimed = session.apply_manual_edits([cue], edits)[0]
-    assert retimed.start == 11.0
-    assert (retimed.score, retimed.token_spans) == (-0.4, [("a", 0.0, 0.5)])
-  finally:
-    shutil.rmtree(media.parent)
+  media = _media(tmp_path)
+  session.save(media, cues=[cue, Cue(20.0, 21.0, "plain", "lrc")])
+  loaded = session.load(media)["cues"]
+  assert loaded[0].score == -0.4 and loaded[0].token_spans == [["a", 0.0, 0.5]]
+  assert getattr(loaded[1], "score", None) is None, "extras leaked onto a bare cue"
+  edits = {"timings": [{"text": "line", "at": 10.0, "start": 11.0, "end": 14.0}]}
+  retimed = session.apply_manual_edits([cue], edits)[0]
+  assert retimed.start == 11.0
+  assert (retimed.score, retimed.token_spans) == (-0.4, [("a", 0.0, 0.5)])
 
 def test_an_inserted_repeat_of_an_existing_lyric_is_replayed():
   """An added record whose text the placement produces elsewhere in the song is
@@ -315,39 +263,33 @@ def test_an_inserted_repeat_of_an_existing_lyric_is_replayed():
 
 # --- candidates ---
 
-def test_user_picked_survives_the_round_trip():
+def test_user_picked_survives_the_round_trip(tmp_path):
   """The low-confidence guard reads user_picked, and lyrickit's Candidate does
   not declare it, so asdict alone drops it."""
-  media = _tmp_media()
-  try:
-    cands = _sample_candidates()
-    cands[1].user_picked = True
-    session.save(media, candidates=cands, chosen_index=1, cues=_sample_cues())
-    loaded = session.load(media)["candidates"]
-    assert loaded[1].user_picked is True
-    assert loaded[0].user_picked is False
-  finally:
-    shutil.rmtree(media.parent)
+  media = _media(tmp_path)
+  cands = _sample_candidates()
+  cands[1].user_picked = True
+  session.save(media, candidates=cands, chosen_index=1, cues=_sample_cues())
+  loaded = session.load(media)["candidates"]
+  assert loaded[1].user_picked is True
+  assert loaded[0].user_picked is False
 
-def test_session_ass_style_reproduces_the_header():
+def test_session_ass_style_reproduces_the_header(tmp_path):
   """The style knobs live in the session, so a re-export writes the same
   header without the flags that chose them."""
-  media = _tmp_media()
-  try:
-    style = {"font": "Meiryo", "size": 40, "outline": 5, "box": True, "pos": 8}
-    session.save(media, cues=[(0.0, 3.0, "hello")], romaji=False,
-                 ass_style=style)
-    sess = session.load(media)
-    assert sess["ass_style"] == style
-    ass = next(p for p in session.reexport(media, sess) if p.suffix == ".ass")
-    head = ass.read_text(encoding="utf-8").split("[Events]")[0]
-    assert "Style: Default,Meiryo,40," in head
-    assert ",100,100,0,0,3,5,1,8,60,60," in head
-  finally:
-    shutil.rmtree(media.parent)
+  media = _media(tmp_path)
+  style = {"font": "Meiryo", "size": 40, "outline": 5, "box": True, "pos": 8}
+  session.save(media, cues=[(0.0, 3.0, "hello")], romaji=False,
+               ass_style=style)
+  sess = session.load(media)
+  assert sess["ass_style"] == style
+  ass = next(p for p in session.reexport(media, sess) if p.suffix == ".ass")
+  head = ass.read_text(encoding="utf-8").split("[Events]")[0]
+  assert "Style: Default,Meiryo,40," in head
+  assert ",100,100,0,0,3,5,1,8,60,60," in head
 
-def test_translation_flag_round_trips_and_reaches_the_ass():
-  media = _tmp_media()
+def test_translation_flag_round_trips_and_reaches_the_ass(tmp_path):
+  media = _media(tmp_path)
   cand = Candidate(title="S", album="", artist="A", source="NetEase",
                    lrc="[00:01.00]ゆめ", tlyric="[00:01.00]梦")
   session.save(media, candidates=[cand], chosen_index=0,
@@ -356,4 +298,3 @@ def test_translation_flag_round_trips_and_reaches_the_ass():
   assert data["translation"] is True
   ass = next(p for p in session.reexport(media, data) if p.suffix == ".ass")
   assert "{\\rTranslation}" in ass.read_text(encoding="utf-8")
-  shutil.rmtree(media.parent, ignore_errors=True)

@@ -82,8 +82,8 @@ EDGE_THRESH_PX = 8  # pixels from edge to trigger edge drag
 NEIGHBOR_SNAP_PX = 8  # pixels from a neighbour cue's edge to snap a resize onto it
 REGION_THRESH_PX = 8  # pixels from region marker to trigger drag
 MIN_REGION_S = 5.0  # minimum region length in seconds
-CANVAS_H = 200      # default waveform block height; splitter drag overrides
-WAVE_SPLIT = 0.45   # share of the timeline tab height given to waveform + lane
+CANVAS_H = 200      # waveform block height; splitter drag overrides, window
+                    # resize does not: extra height goes to the cue grid
 MIN_CUE_LEN_S = 0.05    # a cue never shrinks below this
 MIN_CUE_GAP_S = 0.05    # gap forced between starts when a drag shoves later cues
 ONSET_SNAP_S = 0.150    # snap band around an onset
@@ -94,8 +94,7 @@ NUDGE_S = 0.010         # arrow-key nudge step
 NUDGE_COARSE_S = 0.100  # Ctrl+arrow nudge step
 LEAD_IN_S = 1.0         # pre-roll when playing from the selected cue
 AUTO_ZOOM_PX = 120      # narrower than this on select and the view zooms in
-LABEL_MIN_PX = 20       # cue block narrower than this gets no label
-LABEL_ROMAJI_PX = 80    # ...and needs this much for a second (romaji) row
+LABEL_ROMAJI_PX = 80    # cue block needs this much width for a second (romaji) row
 
 # --- time formatting ---
 

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from dataclasses import replace
 
+import pytest
 from PySide6.QtCore import QPointF
 
 from utasub.core.align import Cue
@@ -150,15 +151,18 @@ def test_ripple_drag_shifts_following_cues():
   for j in range(2, 5):
     assert abs(canvas.cues[j].start - (orig_starts[j] + delta)) < 0.1
 
-def test_ripple_drag_undo_restores_every_moved_cue():
+def test_ripple_drag_undo_redo_restores_every_moved_cue():
   canvas = WaveformCanvas()
   canvas.cues = _fake_cues(5)
   canvas.onsets = []
   orig = [(c.start, c.end) for c in canvas.cues]
   _drag(canvas, 1, DRAG_MOVE, 2.0, ripple=True)
-  assert [(c.start, c.end) for c in canvas.cues] != orig
+  dragged = [(c.start, c.end) for c in canvas.cues]
+  assert dragged != orig
   canvas.do_undo()
   assert [(c.start, c.end) for c in canvas.cues] == orig
+  canvas.do_redo()
+  assert [(c.start, c.end) for c in canvas.cues] == dragged
 
 def test_backward_drag_keeps_starts_non_decreasing():
   """Dragging past a predecessor clamps instead of reordering."""
@@ -169,21 +173,8 @@ def test_backward_drag_keeps_starts_non_decreasing():
   for j in range(1, len(canvas.cues)):
     assert canvas.cues[j].start >= canvas.cues[j - 1].start
 
-def test_undo_redo_restores_state_and_undostack_semantics():
-  """Drag is undoable/redoable; UndoStack push/undo/redo/clear behave."""
-  canvas = WaveformCanvas()
-  canvas.cues = _fake_cues(3)
-  canvas.onsets = []
-  orig_start = canvas.cues[1].start
-  _drag(canvas, 1, DRAG_MOVE, 1.5)
-  edited_start = canvas.cues[1].start
-  assert abs(edited_start - (orig_start + 1.5)) < 0.05
-
-  canvas.do_undo()
-  assert abs(canvas.cues[1].start - orig_start) < 0.05
-  canvas.do_redo()
-  assert abs(canvas.cues[1].start - edited_start) < 0.05
-
+def test_undostack_push_undo_redo_clear():
+  """UndoStack push/undo/redo/clear behave."""
   s = UndoStack()
   assert s.undo() is None and s.redo() is None
   s.push("a")
@@ -197,7 +188,7 @@ def test_undo_redo_restores_state_and_undostack_semantics():
   s.clear()
   assert s.undo() is None
 
-def test_panel_builds_with_waveform_and_save_writes_edits_and_srt():
+def test_save_records_the_drag_as_a_manual_edit_and_reexports_srt():
   """Save persists nudged manual edits and re-exports SRT."""
   d = Path(tempfile.mkdtemp(prefix="utasub_tl_"))
   media = d / "test.mkv"
@@ -234,7 +225,6 @@ def test_repeated_line_keeps_its_own_manual_timing_across_reloads():
   """A chorus line sung twice, dragged twice: the superseded record must not
   survive to claim the second occurrence and re-time it to the first one's
   position (the 22/23 corruption). Reloading keeps both repeats where they are."""
-  from utasub.gui.timeline import occurrence_keys, rebind_timings
   text = "cuz i meant to be your piece"
   cues = [Cue(25.9, 36.0, text, "lrc"), Cue(90.0, 95.0, "middle", "lrc"),
           Cue(164.8, 168.6, text, "lrc")]
@@ -263,7 +253,11 @@ def test_repeated_line_keeps_its_own_manual_timing_across_reloads():
   reloaded.load_cues([replace(panel.canvas.cues[0]), cues[1], cues[2]])
   assert [round(c.start, 2) for c in reloaded.canvas.cues] == [26.4, 90.0, 164.8]
 
-  # and the raw pruning rule: a record matching no cue of an on-screen line goes
+def test_rebind_timings_drops_a_record_matching_no_live_cue():
+  """The raw pruning rule behind the repeat handling: a record matching no cue
+  of an on-screen line goes."""
+  from utasub.gui.timeline import occurrence_keys, rebind_timings
+  text = "cuz i meant to be your piece"
   stale = [{"text": text, "at": 25.172, "start": 25.172, "end": 36.1},
            {"text": text, "at": 26.4, "start": 26.4, "end": 36.5},
            {"text": text, "at": 164.8, "start": 164.8, "end": 168.6}]
@@ -289,7 +283,7 @@ def _canvas_with_cues():
             Cue(30.0, 32.0, "three", "lrc")]
   return c
 
-def test_structural_edits_keep_cue_list_ordered():
+def test_insert_split_merge_remove_land_at_index_and_keep_order():
   """Each op lands at the right index; order preserved."""
   c = _canvas_with_cues()
   c.insert_cue(1, Cue(15.0, 16.0, "inserted", "lrc"))
@@ -347,40 +341,30 @@ def test_offset_cues_clamps_at_zero():
   applied = c.offset_cues(-50.0)
   assert applied == -10.0 and c.cues[0].start == 0.0
 
-def test_resize_clamps_at_neighbour_and_snaps_when_close():
+@pytest.mark.parametrize("idx,mode,delta,suppress,edge,expected", [
+  # cue 2 spans 6.0-8.5, cue 3 starts at 9.0: a 5s stretch clamps at 9.0
+  (2, DRAG_RIGHT, 5.0, False, "end", 9.0),
+  # cue 1 starts at 3.0, cue 0 ends at 2.5: pulling left past it clamps
+  (1, DRAG_LEFT, -2.0, False, "start", 2.5),
+  # Alt bypasses the clamp, overlap allowed
+  (2, DRAG_RIGHT, 5.0, True, "end", 13.5),
+  # snap: stopping just short of the neighbour (8.95, within 8px) lands on it
+  (2, DRAG_RIGHT, 0.45, False, "end", 9.0),
+  # Alt suppresses the neighbour snap, edge stays where dropped
+  (2, DRAG_RIGHT, 0.45, True, "end", 8.95),
+  # body drag snaps whichever edge lands in the band
+  (2, DRAG_MOVE, 0.45, False, "end", 9.0),
+])
+def test_resize_clamps_at_neighbour_and_snaps_when_close(idx, mode, delta,
+                                                         suppress, edge, expected):
   """Right/left edge resize stops at the neighbour's edge, and snaps onto it
   from within the snap band instead of leaving a sliver gap."""
   canvas = WaveformCanvas()
   canvas.cues = _fake_cues(5)
   canvas.onsets = []
-  # cue 2 spans 6.0-8.5, cue 3 starts at 9.0: a 5s stretch clamps at 9.0
-  _drag(canvas, 2, DRAG_RIGHT, 5.0, snap_suppress=False)
-  assert canvas.cues[2].end == 9.0
-  assert canvas.cues[3].start == 9.0  # neighbour untouched
-
-  # cue 1 starts at 3.0, cue 0 ends at 2.5: pulling left past it clamps
-  _drag(canvas, 1, DRAG_LEFT, -2.0, snap_suppress=False)
-  assert canvas.cues[1].start == 2.5
-
-  # Alt bypasses the clamp, overlap allowed
-  canvas.cues = _fake_cues(5)
-  _drag(canvas, 2, DRAG_RIGHT, 5.0, snap_suppress=True)
-  assert canvas.cues[2].end == 13.5
-
-  # snap: stopping just short of the neighbour lands exactly on it
-  canvas.cues = _fake_cues(5)
-  _drag(canvas, 2, DRAG_RIGHT, 0.45, snap_suppress=False)  # 8.95, within 8px of 9.0
-  assert canvas.cues[2].end == 9.0
-
-  # Alt suppresses the neighbour snap, edge stays where dropped
-  canvas.cues = _fake_cues(5)
-  _drag(canvas, 2, DRAG_RIGHT, 0.45, snap_suppress=True)
-  assert canvas.cues[2].end == 8.95
-
-  # body drag snaps whichever edge lands in the band
-  canvas.cues = _fake_cues(5)
-  _drag(canvas, 2, DRAG_MOVE, 0.45, snap_suppress=False)  # end 8.95 -> 9.0
-  assert canvas.cues[2].end == 9.0
+  _drag(canvas, idx, mode, delta, snap_suppress=suppress)
+  assert getattr(canvas.cues[idx], edge) == expected
+  assert canvas.cues[3].start == 9.0, "neighbour touched"
 
 def test_provisional_rebuild_keeps_selection_and_view():
   """Region-click refresh must not reset zoom or selection."""
@@ -579,3 +563,19 @@ def test_a_retyped_and_dragged_line_keeps_its_new_timing():
   replayed = apply_manual_edits(fresh, edits)
   hit = next(c for c in replayed if c.text == "retyped line")
   assert (round(hit.start, 2), round(hit.end, 2)) == (7.4, 9.0)
+
+def test_grid_row_click_keeps_zoom_and_pans_only_when_off_screen():
+  """Row click used to zoom onto the cue; it must keep the span and pan."""
+  sess, audio = _fake_session(10)
+  panel = _panel(sess, audio)
+  panel.canvas.zoom_to_span(0.0, 6.0)
+  view = (panel.canvas.view_start, panel.canvas.view_end)
+  span = view[1] - view[0]
+
+  panel._on_grid_select(0)  # already visible: view untouched
+  assert (panel.canvas.view_start, panel.canvas.view_end) == view
+
+  panel._on_grid_select(8)  # off screen: pan, same span
+  c = panel.canvas.cues[8]
+  assert round(panel.canvas.view_end - panel.canvas.view_start, 6) == round(span, 6)
+  assert panel.canvas.view_start <= c.start and c.end <= panel.canvas.view_end

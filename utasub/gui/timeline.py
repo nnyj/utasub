@@ -14,7 +14,7 @@ from . import theme
 from .cue_grid import CueGrid
 from .waveform import WaveformCanvas, as_cue
 from .timeline_util import (
-  CANVAS_H, WAVE_SPLIT, EDIT_EPS_S, TEXT_NEAR_S, AUTO_ZOOM_PX, NUDGE_S,
+  CANVAS_H, EDIT_EPS_S, TEXT_NEAR_S, AUTO_ZOOM_PX, NUDGE_S,
   NUDGE_COARSE_S,
 )
 # re-exported for callers/tests that import these from .timeline
@@ -146,12 +146,12 @@ class TimelinePanel(QWidget):
     top_layout.addLayout(controls)
     top_layout.addWidget(self.scrollbar)
 
-    # splitter: canvas block on top, grid on bottom. The waveform is the surface
-    # the user edits on, so it takes WAVE_SPLIT of the height, not a fixed 200px.
+    # splitter: canvas block on top, grid on bottom. The waveform block keeps
+    # CANVAS_H at any window size (stretch 0), a taller window grows the grid.
     self._splitter = QSplitter(Qt.Vertical)
     self._splitter.addWidget(top)
     self._splitter.addWidget(self.grid)
-    self._splitter.setStretchFactor(0, 1)
+    self._splitter.setStretchFactor(0, 0)
     self._splitter.setStretchFactor(1, 1)
     self._splitter.setSizes([CANVAS_H, 400])
     self._split_applied = False
@@ -181,12 +181,12 @@ class TimelinePanel(QWidget):
     return super().eventFilter(obj, ev)
 
   def showEvent(self, ev):
-    """Split by ratio once the real height is known; later drags stick."""
+    """Give the grid the rest of the height once it is known; later drags stick."""
     super().showEvent(ev)
     h = self.height()
-    if not self._split_applied and h > 200:
+    if not self._split_applied and h > CANVAS_H:
       self._split_applied = True
-      self._splitter.setSizes([int(h * WAVE_SPLIT), h - int(h * WAVE_SPLIT)])
+      self._splitter.setSizes([CANVAS_H, h - CANVAS_H])
 
   def _update_hint(self):
     """Show/size the empty-state hint over the grid viewport."""
@@ -323,7 +323,19 @@ class TimelinePanel(QWidget):
     if 0 <= row < len(self.canvas.cues):
       self.canvas.selected = row
       self.canvas.selection_changed.emit(row)
-      self._reveal(row)
+      self._scroll_into_view(row)
+
+  def _scroll_into_view(self, idx):
+    """Row click: keep the zoom, pan only when the cue is off screen."""
+    cv = self.canvas
+    c = cv.cues[idx]
+    if c.start < cv.view_start or c.end > cv.view_end:
+      span = cv.view_end - cv.view_start
+      cv.view_start = max(0.0, (c.start + c.end) / 2 - span / 2)
+      cv.view_end = cv.view_start + span
+      cv._clamp_view()
+      cv.view_changed.emit()
+    cv.update()
 
   def _reveal(self, idx):
     """Keep the selected cue workable: zoom the view onto it when it is too

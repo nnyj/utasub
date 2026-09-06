@@ -22,7 +22,7 @@ def _fake_audio_with_gaps(duration_s, singing_regions, sr=16000):
     audio[s_idx:e_idx] = 0.3 * np.sin(2 * np.pi * 440 * t).astype(np.float32)
   return audio
 
-def test_detect_regions_from_audio_gaps():
+def test_detect_regions_returns_one_region_per_song_with_accurate_bounds():
   """3 regions, boundaries approx correct."""
   from utasub.core.regions import detect_regions
   audio = _fake_audio_with_gaps(300, [(10, 60), (90, 150), (180, 240)])
@@ -84,6 +84,28 @@ def test_region_segments_returns_only_in_bounds():
   segs = [(10, 15, "a"), (50, 55, "b"), (70, 75, "c"), (110, 115, "d")]
   result = region_segments(segs, Region(50, 100))
   assert [t for _, _, t in result] == ["b", "c"]
+
+def _three_regions():
+  from utasub.core.regions import Region
+  return [Region(0, 60), Region(100, 160), Region(200, 260)]
+
+def test_expand_window_absorbs_unassigned_neighbours_whole():
+  """Neighbours unassigned: window swallows both plus pad, floored at 0."""
+  from utasub.core.regions import expand_window
+  w0, w1 = expand_window(_three_regions(), 1, lrc_span=60, assigned=[False, False, False])
+  assert (w0, w1) == (0.0, 270.0)
+
+def test_expand_window_clamps_to_assigned_neighbours():
+  """Assigned neighbours own their audio: window stops at margin, not their bounds."""
+  from utasub.core.regions import expand_window
+  w0, w1 = expand_window(_three_regions(), 1, lrc_span=60, assigned=[True, False, True])
+  assert (w0, w1) == (70.0, 190.0)
+
+def test_expand_window_at_list_edge_uses_default_assigned_from_candidate_idx():
+  """First region: no left neighbour, right neighbour assigned via candidate_idx."""
+  from utasub.core.regions import expand_window, Region
+  regions = [Region(0, 60), Region(100, 160, candidate_idx=0)]
+  assert expand_window(regions, 0, lrc_span=60) == (0.0, 90.0)
 
 def test_region_dict_roundtrip():
   from utasub.core.regions import Region

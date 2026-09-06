@@ -364,14 +364,9 @@ def load_audio_16k(path):
 
 def stem_cache_dir():
   """Vocal-stem cache, out of the media folder to keep it tidy.
-  %LOCALAPPDATA%/utasub/stems (temp dir fallback)."""
-  import os
-  import tempfile
-  from pathlib import Path
-  base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
-  d = Path(base) / "utasub" / "stems"
-  d.mkdir(parents=True, exist_ok=True)
-  return d
+  Settings override, else %LOCALAPPDATA%/utasub/stems (temp dir fallback)."""
+  from .paths import cache_dir, default_stem_cache
+  return cache_dir("paths/stem_cache", None, default_stem_cache())
 
 def find_vocals(path):
   """Vocal stem file <name>.vocals.<ext>: beside the source first, then the
