@@ -437,7 +437,8 @@ def _inside_frac(seg, spans):
 
 def _multi_song_finalize(path, segments, audio, regions, assignments,
                          romaji, opts, export=True, mc=True, asr_fill=True,
-                         edits=None, region_scored=None, mc_flags=None):
+                         edits=None, region_scored=None, mc_flags=None,
+                         include_mc=True):
   """Per-region clean/align/merge from assignments, then optionally export+save.
   assignments: list[None | (score, Candidate)] per region.
   export=False (GUI 'Align all'): build cues + metas only, no SRT/session write.
@@ -446,8 +447,9 @@ def _multi_song_finalize(path, segments, audio, regions, assignments,
   off exports lyrics and MC only.
   region_scored: per-region [(score, Candidate)], so each region records the
   index of the candidate actually picked.
-  mc_flags: spoken flags from _multi_song_prepare, classified here when absent."""
-  from .mc import classify_mc, filter_junk, mc_cues, mc_spans, strip_mc
+  mc_flags: spoken flags from _multi_song_prepare, classified here when absent.
+  include_mc: off drops every MC cue; on also keeps in-song MC filling a gap."""
+  from .mc import classify_mc, filter_junk, in_spans, mc_cues, mc_spans, strip_mc
   from .regions import region_segments, fmt_time
   from .align import Cue
 
@@ -501,7 +503,21 @@ def _multi_song_finalize(path, segments, audio, regions, assignments,
                if _inside_frac(seg, unplaced) >= ASR_INSIDE_MAX]
   outside = filter_junk(outside)
   all_cues.extend(outside)
-  spoken = [c for c in spoken if _inside_frac(c, spans) < ASR_INSIDE_MAX]
+  # MC between songs always shows; MC inside a song span shows only when
+  # include_mc is on and it sits in a >=4s hole no placed cue covers (a live
+  # break, not a mishear over a sung line)
+  placed = [(c[0], c[1]) for c in all_cues]
+  def _in_gap(c):
+    if in_spans(c[0], c[1], placed):
+      return False
+    prev = max((b for a, b in placed if b <= c[0]), default=c[0])
+    nxt = min((a for a, b in placed if a >= c[1]), default=c[1])
+    return nxt - prev >= 4.0
+  if include_mc:
+    spoken = [c for c in spoken
+              if _inside_frac(c, spans) < ASR_INSIDE_MAX or _in_gap(c)]
+  else:
+    spoken = []
   all_cues.extend(spoken)
   all_cues.sort(key=lambda c: c[0])
 

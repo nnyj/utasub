@@ -3,7 +3,7 @@ playback toolbar (play button, region bounds, SRT offset/lead).
 Space / T live as menu actions in actions.py."""
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
-  QToolBar, QPushButton, QLineEdit, QLabel, QDoubleSpinBox,
+  QToolBar, QPushButton, QLineEdit, QLabel, QDoubleSpinBox, QCheckBox,
 )
 
 from ..core import export as export_mod
@@ -62,6 +62,16 @@ class PlaybackMixin:
       "Extra head start: cues begin this much earlier, ends unchanged,\n"
       "so a line can overlap the one before it. Write time only.")
     play_tb.addWidget(self._lead_spin)
+
+    self._include_mc_chk = QCheckBox("Include MC")
+    self._include_mc_chk.setChecked(
+      settings().value("include_mc", True, bool))
+    self._include_mc_chk.toggled.connect(
+      lambda v: settings().setValue("include_mc", v))
+    self._include_mc_chk.setToolTip(
+      "Keep spoken MC (stage patter) as its own subtitle track, including a\n"
+      "spoken break inside a song where no lyric line covers it.")
+    play_tb.addWidget(self._include_mc_chk)
 
     self._view_menu.addAction(play_tb.toggleViewAction())
 

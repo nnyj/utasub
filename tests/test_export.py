@@ -1,4 +1,4 @@
-"""ASS karaoke fills, MC romaji, and the subtitle mux command."""
+"""ASS karaoke fills, MC romaji over original, and the subtitle mux command."""
 import re
 import tempfile
 from pathlib import Path
@@ -158,8 +158,8 @@ def test_write_time_offset_carries_the_karaoke_spans():
   assert led.start == 9.0
   assert led.token_spans == [("h", 1.0, 1.5)], "lead did not delay the fill"
 
-def test_ass_mc_line_is_romaji_only():
-  """Gap 10: patter gets romaji in the grey MC style, with no dimmed original,
+def test_ass_mc_line_is_romaji_over_original():
+  """Gap 10: patter gets romaji over the original in the grey MC style,
   while a lyric cue in the same export stays on Default."""
   cues = [Cue(10.0, 15.0, "ゆめのつづき", "coarse"),
           (100.0, 104.0, "みなさん、こんばんは。", "mc")]
@@ -173,8 +173,7 @@ def test_ass_mc_line_is_romaji_only():
   line = dialogue[1]
   assert ",MC,," in line
   assert "Minasan" in line, line
-  assert "みなさん" not in line, line
-  assert "\\N" not in line, "MC line got a second line"
+  assert "\\Nみなさん" in line, "MC line lost the original under the romaji"
 
 # --- .ass header: style lines ---
 

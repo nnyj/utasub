@@ -852,6 +852,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._start_worker(
       _FinalizeWorker(self._media_path, self._segments, self._audio,
                       self._regions, assignments, self._romaji, self._opts,
+                      include_mc=self._include_mc_chk.isChecked(),
                       region_scored=[self._region_scored.get(i, [])
                                      for i in range(len(self._regions))]),
       self._on_finalize_done)

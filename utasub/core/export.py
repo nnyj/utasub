@@ -307,10 +307,11 @@ def export_ass(media_path, cues, *, offset=None, lead=None, style=None,
     style = "Default"
     rom = romanize(text, locale=locale or None) if is_cjk(text) else ""
     if is_mc(seg):
-      # patter is secondary, so it gets the romaji alone in the grey MC style,
-      # no dimmed original underneath
+      # patter is secondary: grey MC style, romaji over the original, no
+      # karaoke fill since it is spoken
       style = "MC"
-      text = rom or text
+      if rom and rom != text:
+        text = f"{rom}\\N{text}"
     else:
       # the top line is what the viewer sings along to, romaji for a CJK line
       # and the line itself for an English one, so that is where the fill goes
