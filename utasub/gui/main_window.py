@@ -22,7 +22,7 @@ from .log import LogDock, install_tee, uninstall_tee
 from .util import human_size, install_shift_hscroll
 from .workers import (
   _FinalizeWorker, _AlignRegionWorker, _PrepareWorker, _EmbedWorker,
-  _SetlistAssignWorker,
+  _SetlistAssignWorker, _TranslateWorker,
 )
 
 MEDIA_FILTER = "Media files (*.mkv *.mp4 *.webm *.m4a *.mp3 *.wav *.flac *.ogg *.opus *.avi);;All files (*)"
@@ -63,6 +63,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._worker_thread = None
     self._prepare_worker = None  # _PrepareWorker
     self._embed_worker = None
+    self._translate_worker = None
     # ASR runs out-of-process (QProcess): a torch/CUDA/native crash kills only the
     # child, never this GUI. Its output is streamed to the log; a tail is kept for
     # the failure dialog.
@@ -1003,16 +1004,89 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
 
   def _on_export_ass(self):
     """Write styled .ass from current timeline cues (romaji over dimmed original).
-    Persists the session first so edits are not lost, but does not touch the SRT."""
+    Persists the session first so edits are not lost, but does not touch the SRT.
+    When the Translate menu has MC or Lyrics checked, missing lines are translated
+    via the LLM endpoint first (cached ones reused), then stored in the session."""
+    if self._translate_worker is not None:
+      return
     self._refresh_timeline_session_meta()
     if not self._timeline.save(export=False):
       return
+    from ..core.export import is_mc
+    sess = self._timeline._session
+    do_mc = self._tr_mc_act.isChecked()
+    do_lyrics = self._tr_lyrics_act.isChecked()
+    if not (do_mc or do_lyrics):
+      self._write_ass({})
+      return
+    existing = dict(sess.get("translations") or {})
+    wanted, need = [], []
+    for c in sess.get("cues", []):
+      text = c[2] if len(c) > 2 else ""
+      if not text or not ((is_mc(c) and do_mc) or (not is_mc(c) and do_lyrics)):
+        continue
+      wanted.append(text)
+      if text not in existing:
+        need.append(text)
+    wanted = set(wanted)
+    shown = {t: existing[t] for t in wanted if t in existing}
+    need = list(dict.fromkeys(need))
+    if not need:
+      self._write_ass(shown)
+      return
+    from ..core.translate import endpoint_alive, ENDPOINT_DEFAULT
+    from .util import settings
+    st = settings()
+    endpoint = st.value("translate/endpoint", ENDPOINT_DEFAULT, str) or ENDPOINT_DEFAULT
+    if not endpoint_alive(endpoint):
+      reply = QMessageBox.question(
+        self, "Translate",
+        f"llama-server not reachable at {endpoint}. Export without translation?",
+        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+      if reply != QMessageBox.Yes:
+        return
+      self._write_ass(shown)
+      return
+    from ..core.translate import MODEL_DEFAULT, TARGET_DEFAULT
+    target = st.value("translate/target", TARGET_DEFAULT, str) or TARGET_DEFAULT
+    model = st.value("translate/model", MODEL_DEFAULT, str) or ""
+    self._tr_need = need
+    self._tr_wanted = wanted
+    self._tr_cached = len(wanted) - len(need)
+    print(f"\n=== Translating {len(need)} line(s) to {target} ({self._tr_cached} cached)")
+    self._export_ass_act.setEnabled(False)
+    self._translate_worker = _TranslateWorker(need, target, endpoint, model)
+    self._translate_worker.done.connect(self._on_translate_done)
+    self._translate_worker.error.connect(self._on_translate_error)
+    self._translate_worker.start()
+
+  def _on_translate_done(self, result):
+    self._translate_worker = None
+    self._export_ass_act.setEnabled(True)
+    sess = self._timeline._session
+    existing = dict(sess.get("translations") or {})
+    new_map = {t: tr for t, tr in zip(self._tr_need, result or []) if tr}
+    existing.update(new_map)
+    sess["translations"] = existing
+    self._timeline.save(export=False)  # persist merged translations
+    print(f"  translated {len(new_map)} lines ({self._tr_cached} cached)")
+    self._write_ass({t: existing[t] for t in self._tr_wanted if t in existing})
+
+  def _on_translate_error(self, msg):
+    self._translate_worker = None
+    self._export_ass_act.setEnabled(True)
+    print(f"  translate error: {msg}")
+    QMessageBox.warning(self, "Translate", f"Translation failed:\n{msg}")
+
+  def _write_ass(self, translations):
+    """Write the .ass with the given {text: translation} map (filtered to the
+    chosen scope by the caller) and refresh the embed/preview actions."""
     from ..core.export import export_ass
-    from ..core.session import _translations
     sess = self._timeline._session
     export_ass(self._media_path, sess.get("cues", []),
                offset=self._offset_spin.value(), lead=self._lead_spin.value(),
-               style=sess.get("ass_style"), translations=_translations(sess))
+               style=sess.get("ass_style"), translations=translations,
+               translation_top=self._tr_top_act.isChecked())
     self._exported = True
     self._refresh_embed_action()
     print("  exported ASS")
@@ -1074,6 +1148,9 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
       self._transcribe_proc.waitForFinished(2000)
     if self._embed_worker is not None and self._embed_worker.isRunning():
       self._embed_worker.wait(3000)
+    if self._translate_worker is not None and self._translate_worker.isRunning():
+      self._translate_worker.blockSignals(True)
+      self._translate_worker.wait(3000)
     uninstall_tee()
     super().closeEvent(event)
 

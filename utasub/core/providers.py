@@ -28,34 +28,6 @@ def embedded_lyrics(path, tags=None):
     lrc=lrc,
   )
 
-# --- translations ---
-
-TRANSLATION_NEAR_S = 0.5   # a translated line this close to an LRC line is that line
-
-def translation_lines(candidate):
-  """{original line text: translated text} from a candidate's `tlyric`.
-  Translated lines carry their own timestamps, so they match the LRC by time
-  within TRANSLATION_NEAR_S and fall back to position when a provider timed the
-  translation off its own copy of the song. Keyed by text, since a cue reaches
-  the exporter with its lyric line but not the LRC time it came from."""
-  tlyric = getattr(candidate, "tlyric", "")
-  if not tlyric or not candidate.lrc:
-    return {}
-  orig, trans = parse_lrc(candidate.lrc), parse_lrc(tlyric)
-  out, used = {}, set()
-  for i, (t, text) in enumerate(orig):
-    near = [j for j, (tt, _) in enumerate(trans)
-            if tt is not None and j not in used and abs(tt - t) <= TRANSLATION_NEAR_S
-            ] if t is not None else []
-    hit = min(near, key=lambda j: abs(trans[j][0] - t)) if near else (
-      i if i < len(trans) and i not in used else None)
-    if hit is None:
-      continue
-    used.add(hit)
-    if trans[hit][1] != text:
-      out[text] = trans[hit][1]
-  return out
-
 # --- field alternates (picker prefill, artist hint) ---
 
 def _parse_filename(path):

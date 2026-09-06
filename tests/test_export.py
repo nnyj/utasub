@@ -372,11 +372,6 @@ def test_export_srt_writes_a_romaji_sidecar_and_clamps_a_negative_start():
 
 # --- translation line ---
 
-def _tr_cand(tlyric):
-  from utasub.core.providers import Candidate
-  return Candidate(title="晴る", album="", artist="ヨルシカ", source="NetEase",
-                   lrc="[00:01.00]ゆめのつづき\n[00:03.00]あなたは夏の風", tlyric=tlyric)
-
 def _ass_dialogue(cues, translations):
   with tempfile.TemporaryDirectory() as tmp:
     out = export.export_ass(_tmp_media(tmp), cues, offset=0.0, lead=0.0,
@@ -385,29 +380,47 @@ def _ass_dialogue(cues, translations):
   return [ln for ln in body.splitlines() if ln.startswith("Dialogue:")]
 
 def test_translation_adds_a_third_line_under_the_original():
-  from utasub.core.providers import translation_lines
   cues = [Cue(0.0, 2.0, "ゆめのつづき", "lrc"), Cue(2.0, 4.0, "あなたは夏の風", "lrc")]
-  cand = _tr_cand("[00:01.00]梦的延续\n[00:03.00]你似那夏日薰风")
-  lines = _ass_dialogue(cues, translation_lines(cand))
+  lines = _ass_dialogue(cues, {"ゆめのつづき": "梦的延续", "あなたは夏の風": "你似那夏日薰风"})
   assert [ln.count("\\N") for ln in lines] == [2, 2]
   assert "梦的延续" in lines[0] and "你似那夏日薰风" in lines[1]
   assert "{\\rTranslation}" in lines[0]
 
-def test_no_tlyric_leaves_two_lines():
-  from utasub.core.providers import translation_lines
+def test_no_translation_leaves_two_lines():
   cues = [Cue(0.0, 2.0, "ゆめのつづき", "lrc"), Cue(2.0, 4.0, "あなたは夏の風", "lrc")]
-  lines = _ass_dialogue(cues, translation_lines(_tr_cand("")))
+  lines = _ass_dialogue(cues, {})
   assert [ln.count("\\N") for ln in lines] == [1, 1]
 
-def test_translation_matches_a_shifted_timestamp_within_half_a_second():
-  from utasub.core.providers import translation_lines
-  cand = _tr_cand("[00:01.40]梦的延续\n[00:03.40]你似那夏日薰风")
-  assert translation_lines(cand)["ゆめのつづき"] == "梦的延续"
+def _margin_v(line):
+  return int(line.split(",")[7])
 
-def test_translation_falls_back_to_position_when_timestamps_are_unrelated():
-  """A translation timed off another cut of the song lines up nowhere, so the
-  nearest-timestamp pass finds nothing and order decides."""
-  from utasub.core.providers import translation_lines
-  cand = _tr_cand("[01:40.00]梦的延续\n[01:42.00]你似那夏日薰风")
-  assert translation_lines(cand) == {"ゆめのつづき": "梦的延续",
-                                     "あなたは夏の風": "你似那夏日薰风"}
+def _ass_dialogue_top(cues, translations):
+  with tempfile.TemporaryDirectory() as tmp:
+    out = export.export_ass(_tmp_media(tmp), cues, offset=0.0, lead=0.0,
+                            translations=translations, translation_top=True)
+    body = out.read_text(encoding="utf-8").split("[Events]")[1]
+  return [ln for ln in body.splitlines() if ln.startswith("Dialogue:")]
+
+def test_translation_top_puts_the_translation_first_single_event():
+  """translation_top=True renders the translation above the sung line in a single
+  event: {\\rTranslation}<tr> leads, a bare \\r restores the cue style below."""
+  cues = [Cue(0.0, 2.0, "ゆめのつづき", "lrc")]
+  lines = _ass_dialogue_top(cues, {"ゆめのつづき": "梦的延续"})
+  assert "{\\rTranslation}梦的延续\\N{\\r}" in lines[0], lines[0]
+
+def test_translation_top_gets_the_highest_margin_v_when_stacked():
+  """A karaoke'd original emits stacked events; translation_top lifts the
+  Translation event to the highest MarginV so it sits above the sung line."""
+  from utasub.core.romanize import romanize
+  cue = Cue(10.0, 14.0, "空に浮かぶ月", "lrc")
+  cue.token_spans = _spans(romanize(cue.text, locale="ja"), per=0.1)
+  lines = _ass_dialogue_top([cue], {"空に浮かぶ月": "浮月"})
+  tr_line = [l for l in lines if ",Translation,," in l][0]
+  assert _margin_v(tr_line) == max(_margin_v(l) for l in lines), lines
+
+def test_mc_cue_gets_a_translation_line():
+  """MC patter used to skip the translation lookup; it now takes one too."""
+  cues = [(100.0, 104.0, "みなさん、こんばんは。", "mc")]
+  lines = _ass_dialogue(cues, {"みなさん、こんばんは。": "Hello everyone"})
+  assert ",MC,," in lines[0]
+  assert "{\\rTranslation}Hello everyone" in lines[0], lines[0]

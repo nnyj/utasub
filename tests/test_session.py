@@ -288,13 +288,17 @@ def test_session_ass_style_reproduces_the_header(tmp_path):
   assert "Style: Default,Meiryo,40," in head
   assert ",100,100,0,0,3,5,1,8,60,60," in head
 
-def test_translation_flag_round_trips_and_reaches_the_ass(tmp_path):
+def test_translations_round_trip_and_reach_the_ass(tmp_path):
   media = _media(tmp_path)
-  cand = Candidate(title="S", album="", artist="A", source="NetEase",
-                   lrc="[00:01.00]ゆめ", tlyric="[00:01.00]梦")
-  session.save(media, candidates=[cand], chosen_index=0,
-               cues=[(0.0, 2.0, "ゆめ", "lrc")], translation=True)
+  session.save(media, cues=[(0.0, 2.0, "ゆめ", "lrc")],
+               translations={"ゆめ": "梦"})
   data = session.load(media)
-  assert data["translation"] is True
+  assert data["translations"] == {"ゆめ": "梦"}
   ass = next(p for p in session.reexport(media, data) if p.suffix == ".ass")
   assert "{\\rTranslation}" in ass.read_text(encoding="utf-8")
+
+def test_plain_save_preserves_stored_translations(tmp_path):
+  media = _media(tmp_path)
+  session.save(media, cues=[(0.0, 2.0, "ゆめ", "lrc")], translations={"ゆめ": "梦"})
+  session.save(media, cues=[(0.0, 2.0, "ゆめ", "lrc")])  # no translations arg
+  assert session.load(media)["translations"] == {"ゆめ": "梦"}

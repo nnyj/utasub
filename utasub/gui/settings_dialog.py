@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 from ..core.paths import (
   default_hf_home, default_lyrics_dir, default_stem_cache, resolve_dir,
 )
+from ..core import translate
 from .util import human_size, settings
 
 # label, QSettings key, env var (None = no env fallback), default factory
@@ -18,6 +19,13 @@ ROWS = [
   ("Stem cache", "paths/stem_cache", None, default_stem_cache),
   ("Lyrics dir", "paths/lyrics_dir", "LYRICS_DIR", default_lyrics_dir),
   ("HF models", "paths/hf_home", "HF_HOME", default_hf_home),
+]
+
+# plain text prefs for the LLM translate action: label, QSettings key, default
+TR_ROWS = [
+  ("LLM endpoint", "translate/endpoint", translate.ENDPOINT_DEFAULT),
+  ("LLM model", "translate/model", translate.MODEL_DEFAULT),
+  ("Translation target", "translate/target", translate.TARGET_DEFAULT),
 ]
 
 def dir_size(path):
@@ -56,13 +64,22 @@ class SettingsDialog(QDialog):
       grid.addWidget(browse, row, 2)
       grid.addWidget(QLabel("—" if used is None else human_size(used)), row, 3)
       self._edits.append((key, edit))
+    base = len(ROWS)
+    for i, (label, key, default) in enumerate(TR_ROWS):
+      edit = QLineEdit(st.value(key, "", str) or "")
+      edit.setMinimumWidth(360)
+      edit.setPlaceholderText(default or "")
+      grid.addWidget(QLabel(label), base + i, 0)
+      grid.addWidget(edit, base + i, 1)
+      self._edits.append((key, edit))
+    tail = base + len(TR_ROWS)
     note = QLabel("Lyrics and HF paths apply on the next launch.")
     note.setEnabled(False)
-    grid.addWidget(note, len(ROWS), 0, 1, 4)
+    grid.addWidget(note, tail, 0, 1, 4)
     buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
     buttons.accepted.connect(self.accept)
     buttons.rejected.connect(self.reject)
-    grid.addWidget(buttons, len(ROWS) + 1, 0, 1, 4)
+    grid.addWidget(buttons, tail + 1, 0, 1, 4)
 
   def _browse(self, edit):
     start = edit.text().strip() or edit.placeholderText()

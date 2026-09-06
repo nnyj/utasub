@@ -85,7 +85,6 @@ class PickerPanel(QWidget):
     self._chosen_index = None  # index into _scored, or -1 for paste
     self._paste_text = ""
     self._verdict_cache = {}  # row_index -> (lines, verdicts)
-    self._translations = {}   # original line -> translation, for the previewed row
     self._stale_workers = []  # superseded SearchWorkers still running
     self._region_idx = None   # region a search/apply targets
 
@@ -359,8 +358,7 @@ class PickerPanel(QWidget):
     elif 0 <= row < len(self._scored):
       self._chosen_index = row
       self.preview.setReadOnly(True)
-      self._show_with_credits(self._scored[row][1].lrc, row_index=row,
-                              candidate=self._scored[row][1])
+      self._show_with_credits(self._scored[row][1].lrc, row_index=row)
     else:
       self._chosen_index = None
       self.preview.setPlainText("")
@@ -405,8 +403,6 @@ class PickerPanel(QWidget):
     strike_fmt.setForeground(QBrush(theme.CREDIT_STRIKE))
     romaji_fmt = QTextCharFormat()
     romaji_fmt.setForeground(QBrush(theme.ROMAJI_CYAN))  # cyan for romaji
-    trans_fmt = QTextCharFormat()
-    trans_fmt.setForeground(QBrush(theme.DIM))  # grey for the translation
     for i, ((t, text), v) in enumerate(zip(self._credit_lines, self._credit_verdicts)):
       if i > 0:
         cursor.insertText("\n")
@@ -419,21 +415,15 @@ class PickerPanel(QWidget):
         if rom and rom != text:
           cursor.insertText("\n")
           cursor.insertText(prefix + rom, romaji_fmt)
-      tr = self._translations.get(text) if v != "credit" else None
-      if tr:
-        cursor.insertText("\n")
-        cursor.insertText(prefix + tr, trans_fmt)
     self.preview.setTextCursor(cursor)
     self.preview.moveCursor(QTextCursor.Start)
 
-  def _show_with_credits(self, lrc_text, row_index=None, candidate=None):
+  def _show_with_credits(self, lrc_text, row_index=None):
     """Show LRC in preview with strikethrough on credit lines, populate toggle list.
-    row_index: cache key for classify verdicts (avoids re-running on selection change).
-    candidate: source of the greyed translation lines, when it carries a tlyric."""
+    row_index: cache key for classify verdicts (avoids re-running on selection change)."""
     from lyrickit import classify_lines
-    from ..core.providers import parse_lrc, translation_lines
+    from ..core.providers import parse_lrc
 
-    self._translations = translation_lines(candidate) if candidate else {}
     lines = parse_lrc(lrc_text)
     if not lines:
       self.preview.setPlainText(lrc_text)

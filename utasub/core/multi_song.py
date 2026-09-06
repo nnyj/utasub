@@ -47,10 +47,9 @@ def export_and_save(path, cues, romaji, edits=None, **save_kw):
   from . import export as export_mod, session
   if edits and any(edits.get(k) for k in session.EDIT_KINDS):
     cues = session.apply_manual_edits(cues, edits)
-  # CLI --ass-* / --translation live on export module globals, pin them into the
-  # session so the .ass written here and any later re-export agree
+  # CLI --ass-* live on export module globals, pin them into the session so the
+  # .ass written here and any later re-export agree
   save_kw.setdefault("ass_style", export_mod.ass_style())
-  save_kw.setdefault("translation", export_mod.ASS_TRANSLATION)
   session.save(path, cues=cues, romaji=romaji, manual_edits=edits, **save_kw)
   session.reexport(path, session.load(path))
   return cues

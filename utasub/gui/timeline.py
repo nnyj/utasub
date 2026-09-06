@@ -634,6 +634,7 @@ class TimelinePanel(QWidget):
       lead=self._session.get("lead"),
       region_choices=self._session.get("region_choices"),
       ass_style=self._session.get("ass_style"),
+      translations=self._session.get("translations"),
     )
     if export:
       sess_mod.reexport(self._media_path, self._session)

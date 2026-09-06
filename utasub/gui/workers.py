@@ -54,6 +54,14 @@ class _EmbedWorker(_Job):
     from ..core.export import embed_subs
     return str(embed_subs(media_path, sub_paths))
 
+class _TranslateWorker(_Job):
+  """LLM translation of cue texts over the OpenAI-compatible endpoint. Off-thread
+  because a batch on a local model can take a minute."""
+
+  def _work(self, texts, target, endpoint, model):
+    from ..core.translate import translate_lines
+    return translate_lines(texts, target, endpoint, model=model)
+
 class _PrepareWorker(_Job):
   """ASR + audio load, then region prepare. session_only=True stops after the
   media load: a saved session already holds its cues and regions, only the

@@ -174,10 +174,6 @@ def main():
                            "over bright stage video")
   parser.add_argument("--ass-pos", type=int, choices=(2, 8), default=2,
                       help="subtitle position: 2 bottom (default), 8 top")
-  parser.add_argument("--translation", action=argparse.BooleanOptionalAction,
-                      default=False,
-                      help="third .ass line with the candidate's translated "
-                           "lyrics, when the provider carries one (default OFF)")
   args = parser.parse_args()
 
   if args.gui or args.timeline:
@@ -192,7 +188,6 @@ def main():
   export_mod.ASS_STYLE = {"font": args.ass_font, "size": args.ass_size,
                           "outline": args.ass_outline, "box": args.ass_box,
                           "pos": args.ass_pos}
-  export_mod.ASS_TRANSLATION = args.translation
   from .core.romanize import set_lang_override
   set_lang_override(args.lang)  # beats per-song detection everywhere, incl. GUI menu
   providers = [p.strip() for p in args.providers.split(",") if p.strip()]

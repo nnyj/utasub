@@ -227,7 +227,7 @@ def save(media_path, *, candidates=None, chosen_index=None, cues=None,
          song_span=None, romaji=True, credit_toggles=None,
          regions=None, placement=None, region_metas=None,
          offset=None, lead=None, region_choices=None, manual_edits=None,
-         mc_spans=None, ass_style=None, translation=None):
+         mc_spans=None, ass_style=None, translations=None):
   """Write session file. candidates = list of Candidate dataclass.
   region_metas: per-region strategy dicts from multi-song finalize.
   region_choices: {region_idx: (score, Candidate)} picked per region, so
@@ -236,7 +236,9 @@ def save(media_path, *, candidates=None, chosen_index=None, cues=None,
   re-export keeps the MC track without re-classifying.
   offset/lead: SRT write-time timing, stored so re-export reproduces the SRT.
   ass_style: .ass style knobs, stored so re-export reproduces the header.
-  translation: third .ass line from the candidate's tlyric."""
+  translations: {cue text: translated text} from the LLM translate action, kept
+  so re-export reproduces the third .ass line without re-calling the model.
+  None preserves any translations already on disk."""
   from . import export as export_mod
   SRT_OFFSET_S, SRT_LEAD_S = export_mod.SRT_OFFSET_S, export_mod.SRT_LEAD_S
   cue_meta = [_cue_extras(c) for c in (cues or [])]  # positional, one per cue
@@ -258,7 +260,6 @@ def save(media_path, *, candidates=None, chosen_index=None, cues=None,
     "offset": SRT_OFFSET_S if offset is None else offset,
     "lead": SRT_LEAD_S if lead is None else lead,
     "ass_style": dict(export_mod.ASS_STYLE) if ass_style is None else dict(ass_style),
-    "translation": bool(export_mod.ASS_TRANSLATION if translation is None else translation),
     "region_choices": [
       {"region_idx": idx, "score": score, "candidate": _cand_dict(cand)}
       for idx, (score, cand) in sorted((region_choices or {}).items())
@@ -268,6 +269,10 @@ def save(media_path, *, candidates=None, chosen_index=None, cues=None,
   existing = _read_raw(media_path)
   if existing and "asr" in existing:
     data["asr"] = existing["asr"]
+  # translations None means "leave what is on disk": a plain Save must not wipe
+  # the LLM map, only the translate action passes a new one
+  data["translations"] = (dict(existing.get("translations") or {}) if existing else {}
+                          ) if translations is None else dict(translations)
   return _write_raw(media_path, data)
 
 def load(media_path):
@@ -326,17 +331,5 @@ def reexport(media_path, session_data):
   return written
 
 def _translations(session_data):
-  """Merged {original: translated} over every candidate this session chose, or
-  {} when --translation was off. Merging is safe: the maps key on lyric text, so
-  a per-region candidate only adds the lines of its own song."""
-  if not session_data.get("translation"):
-    return {}
-  from .providers import translation_lines
-  chosen = [c for _, c in (session_data.get("region_choices") or {}).values()]
-  idx, cands = session_data.get("chosen_index"), session_data.get("candidates") or []
-  if isinstance(idx, int) and 0 <= idx < len(cands):
-    chosen.append(cands[idx])
-  out = {}
-  for cand in chosen:
-    out.update(translation_lines(cand))
-  return out
+  """{cue text: translated text} stored by the LLM translate action, or {}."""
+  return session_data.get("translations") or {}

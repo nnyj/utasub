@@ -150,9 +150,6 @@ ASS_MC_COLOUR = "&H00B4B4B4"   # grey: patter reads as secondary to the song
 # line reads as dim-then-white; lines without spans never use it.
 ASS_UNSUNG_COLOUR = "&H00909090"
 ASS_TR_COLOUR = "&H0080D8A0"   # pale green: translation reads apart from white sung line and grey MC
-# Process-wide --translation: a third line under the original, when the chosen
-# candidate carries one. Stored in the session, so re-export keeps it.
-ASS_TRANSLATION = False
 # Process-wide style overrides from the CLI flags: font, size, outline, box,
 # pos. Empty = the constants above. Stored in the session, so a re-export
 # reproduces the header without the flags.
@@ -283,12 +280,13 @@ def _ass_header(font, font_size, outline, shadow, margin_v, play_res,
     "Effect, Text\n")
 
 def export_ass(media_path, cues, *, offset=None, lead=None, style=None,
-               translations=None):
+               translations=None, translation_top=False):
   """Write <name>.ass. Japanese cues render romaji on top, original dimmed
   below; non-Japanese cues stay one line. offset/lead reuse SRT write-time
   knobs; style overrides the module-level ASS_* constants (see `ass_style`).
-  translations: {original text: translated text} from `providers.translation_lines`,
-  adding a third line in the Translation style. Returns written path."""
+  translations: {original text: translated text} from the session's stored LLM
+  translations, adding a line in the Translation style (below the cue by default, above it when
+  translation_top). Returns written path."""
   offset = SRT_OFFSET_S if offset is None else offset
   lead = SRT_LEAD_S if lead is None else lead
   st = ass_style(style)
@@ -305,6 +303,7 @@ def export_ass(media_path, cues, *, offset=None, lead=None, style=None,
     if not text:
       continue
     style = "Default"
+    tr = (translations or {}).get(seg[2])
     rom = romanize(text, locale=locale or None) if is_cjk(text) else ""
     if is_mc(seg):
       # patter is secondary: grey MC style, romaji over the original, no
@@ -347,27 +346,32 @@ def export_ass(media_path, cues, *, offset=None, lead=None, style=None,
         text = f"{sung}\\N{orig}"
       else:
         text = sung
-      tr = (translations or {}).get(seg[2])
       if kfill:
         # two sung lines cannot share one event: \k time accumulates across \N,
         # so the lower line's fill would only start after the upper line's runs
         # elapse. Emit each as its own event, stacked bottom-up by MarginV, each
-        # with its own \k timeline from zero. Translation sits below the original.
+        # with its own \k timeline from zero. Translation sits below the original,
+        # or above the sung line (highest MarginV) when translation_top.
         stack, below = [], ASS_MARGIN_V
-        if tr:
+        if tr and not translation_top:
           stack.append((below, "Translation", tr))
           below += dim_size + ASS_STACK_GAP
         stack.append((below, "Default", orig))
         below += dim_size + ASS_STACK_GAP
         stack.append((below, "Default", sung))
+        if tr and translation_top:
+          below += dim_size + ASS_STACK_GAP
+          stack.append((below, "Translation", tr))
         for mv, sty, ln in stack:
           body.append(f"Dialogue: 0,{ass_timestamp(start)},{ass_timestamp(end)},"
                       f"{sty},,0,0,{mv},,{fade}{ln}")
         continue
-      # \r switches the rest of the line to the named style, so the colour and
-      # the dim size both come from the header rather than more inline tags
-      if tr:
-        text += f"\\N{{\\rTranslation}}{tr}"
+    # \r switches the rest of the line to the named style, so the colour and the
+    # dim size both come from the header rather than more inline tags; a bare \r
+    # restores the event's own style for the lines below the translation
+    if tr:
+      text = (f"{{\\rTranslation}}{tr}\\N{{\\r}}{text}" if translation_top
+              else f"{text}\\N{{\\rTranslation}}{tr}")
     body.append(f"Dialogue: 0,{ass_timestamp(start)},{ass_timestamp(end)},"
                 f"{style},,0,0,0,,{fade}{text}")
   out_path = Path(media_path).with_suffix(".ass")

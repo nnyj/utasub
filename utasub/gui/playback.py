@@ -4,6 +4,7 @@ Space / T live as menu actions in actions.py."""
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
   QToolBar, QPushButton, QLineEdit, QLabel, QDoubleSpinBox, QCheckBox,
+  QToolButton, QMenu,
 )
 
 from ..core import export as export_mod
@@ -73,7 +74,29 @@ class PlaybackMixin:
       "spoken break inside a song where no lyric line covers it.")
     play_tb.addWidget(self._include_mc_chk)
 
+    self._translate_btn = QToolButton()
+    self._translate_btn.setText("Translate ▾")
+    self._translate_btn.setPopupMode(QToolButton.InstantPopup)
+    self._translate_btn.setToolTip(
+      "Add an LLM translation line to the exported .ass, below the sung/romaji\n"
+      "line (or on top). Needs llama-server; configure it in Settings.")
+    menu = QMenu(self._translate_btn)
+    self._tr_mc_act = self._tr_menu_action(menu, "MC", "translate/mc")
+    self._tr_lyrics_act = self._tr_menu_action(menu, "Lyrics", "translate/lyrics")
+    self._tr_top_act = self._tr_menu_action(menu, "On top", "translate/top")
+    self._translate_btn.setMenu(menu)
+    play_tb.addWidget(self._translate_btn)
+
     self._view_menu.addAction(play_tb.toggleViewAction())
+
+  @staticmethod
+  def _tr_menu_action(menu, label, key):
+    """Checkable Translate-menu entry backed by a persisted bool pref."""
+    act = menu.addAction(label)
+    act.setCheckable(True)
+    act.setChecked(settings().value(key, False, bool))
+    act.toggled.connect(lambda v: settings().setValue(key, v))
+    return act
 
   @staticmethod
   def _export_spin(key, default, span, tooltip):
