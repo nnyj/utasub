@@ -37,6 +37,7 @@ PLAYING_BORDER = QColor(255, 210, 130, 230)  # accent border on cue under playhe
 # amber: a cue or region the tool is least sure of, not an error
 CONF_LOW = QColor(235, 175, 70)
 CONF_LOW_BG = QColor(200, 140, 40, 55)
+CONF_NONE_BG = QColor(200, 60, 60, 45)  # faint red: no stamp, needs recalc
 
 CONF_COLORS = {
   "lrc": QColor(60, 180, 80, 80),

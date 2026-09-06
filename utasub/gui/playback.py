@@ -17,6 +17,17 @@ try:
 except ImportError:  # QtMultimedia optional: playback disabled if absent
   QMediaPlayer = QAudioOutput = QAudio = None
 
+class _StayOpenMenu(QMenu):
+  """Checkable entries toggle without closing, so several flags can be set in
+  one visit; other entries and clicking away close as usual."""
+
+  def mouseReleaseEvent(self, ev):
+    act = self.actionAt(ev.pos())
+    if act is not None and act.isCheckable():
+      act.trigger()
+      return
+    super().mouseReleaseEvent(ev)
+
 class PlaybackMixin:
   """Playback toolbar + transport. Mixed into MainWindow, uses its state."""
 
@@ -90,10 +101,14 @@ class PlaybackMixin:
     self._translate_btn.setToolTip(
       "Add an LLM translation line to the exported .ass, below the sung/romaji\n"
       "line (or on top). Needs llama-server; configure it in Settings.")
-    menu = QMenu(self._translate_btn)
+    menu = _StayOpenMenu(self._translate_btn)
     self._tr_mc_act = self._tr_menu_action(menu, "MC", "translate/mc")
     self._tr_lyrics_act = self._tr_menu_action(menu, "Lyrics", "translate/lyrics")
     self._tr_top_act = self._tr_menu_action(menu, "On top", "translate/top")
+    menu.addSeparator()
+    # stays enabled: a disabled action greys its icon, hiding the red/green dot
+    self._tr_status_act = menu.addAction("LLM: checking...")
+    menu.addAction("Reconnect", self.probe_llm)
     self._translate_btn.setMenu(menu)
     play_tb.addWidget(self._translate_btn)
 

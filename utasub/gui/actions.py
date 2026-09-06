@@ -65,7 +65,8 @@ def _open_cache_folder():
 
 def _open_settings(win):
   from .settings_dialog import SettingsDialog
-  SettingsDialog(win).exec()
+  if SettingsDialog(win).exec():
+    win.probe_llm()  # endpoint may have changed
 
 def build_actions(win):
   """Create every action, the menu bar and the icon toolbar for `win`."""
@@ -135,6 +136,30 @@ def build_actions(win):
   win._align_all_act.setToolTip("Align all regions into the timeline for editing")
   win._align_all_act.triggered.connect(win._on_align_all)
   win._align_all_act.setEnabled(False)
+
+  win._recalc_act = QAction(theme.icon("align_region", theme.ICON_ALIGN), "Recalc syllables", win)
+  win._recalc_act.setToolTip("CTC-align the cue text inside its current bounds to "
+                             "fill the karaoke syllable timing and confidence, "
+                             "bounds unchanged")
+  win._recalc_act.setEnabled(False)
+  win._recalc_act.triggered.connect(lambda: win._on_recalc_selected())
+
+  def _recalc_blank():
+    cues = win._timeline.canvas.cues
+    rows = [i for i, c in enumerate(cues) if getattr(c, "score", None) is None]
+    if not rows:
+      win._say("recalc: no blank cues")
+      return
+    win._on_recalc_selected(rows=rows)
+
+  win._recalc_blank_act = QAction("Recalc syllables (blank only)", win)
+  win._recalc_blank_act.setEnabled(False)
+  win._recalc_blank_act.triggered.connect(lambda: _recalc_blank())
+
+  win._recalc_all_act = QAction("Recalc syllables (all)", win)
+  win._recalc_all_act.setEnabled(False)
+  win._recalc_all_act.triggered.connect(
+    lambda: win._on_recalc_selected(rows=list(range(len(win._timeline.canvas.cues)))))
 
   win._lrc_as_is_act = QAction(theme.icon("lrc_as_is", theme.ICON_LRC), "Use LRC as-is", win)
   win._lrc_as_is_act.setToolTip("Load the LRC timestamps into the timeline unaligned, "
@@ -218,6 +243,7 @@ def build_actions(win):
   win._cue_key_acts = cue_key_acts
   timeline.grid.editing_changed.connect(
     lambda editing: [a.setEnabled(not editing) for a in cue_key_acts])
+  timeline.grid.recalc_requested.connect(win._on_recalc_selected)
 
   cleanup_act = QAction(theme.icon("cleanup", theme.ICON_DESTRUCTIVE), "Cleanup files", win)
   cleanup_act.setToolTip("Delete stray stem / asr / txt files")
@@ -262,6 +288,9 @@ def build_actions(win):
   align_menu = mb.addMenu("Align")
   align_menu.addAction(win._align_region_act)
   align_menu.addAction(win._align_all_act)
+  align_menu.addAction(win._recalc_act)
+  align_menu.addAction(win._recalc_blank_act)
+  align_menu.addAction(win._recalc_all_act)
   align_menu.addAction(win._lrc_as_is_act)
   align_menu.addSeparator()
   region_menu = align_menu.addMenu("Region")

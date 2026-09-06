@@ -40,6 +40,15 @@ class _AlignRegionWorker(_Job):
                                          assignment, opts, regions, scored=scored)
     return cues, meta, region_idx
 
+class _RecalcWorker(_Job):
+  """Fill karaoke syllable timing for selected cues off-thread: CTC forced-align
+  each cue's text inside its own bounds. jobs = [(idx, cue)]; returns
+  [(idx, SyllableResult|None)]. Bounds are never moved."""
+
+  def _work(self, audio, sr, jobs):
+    from ..core.syllables import syllabize_cue
+    return [(idx, syllabize_cue(cue, audio, sr)) for idx, cue in jobs]
+
 class _SetlistAssignWorker(_Job):
   """Setlist DP over the regions for a pasted setlist (fetch + score)."""
 
@@ -61,6 +70,14 @@ class _TranslateWorker(_Job):
   def _work(self, texts, target, endpoint, model):
     from ..core.translate import translate_lines
     return translate_lines(texts, target, endpoint, model=model)
+
+class _EndpointProbe(_Job):
+  """Is the LLM endpoint up. Off-thread so a dead server's timeout never
+  stalls the window."""
+
+  def _work(self, endpoint):
+    from ..core.translate import endpoint_alive
+    return endpoint_alive(endpoint)
 
 class _PrepareWorker(_Job):
   """ASR + audio load, then region prepare. session_only=True stops after the

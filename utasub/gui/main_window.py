@@ -22,7 +22,7 @@ from .log import LogDock, install_tee, uninstall_tee
 from .util import human_size, install_shift_hscroll
 from .workers import (
   _FinalizeWorker, _AlignRegionWorker, _PrepareWorker, _EmbedWorker,
-  _SetlistAssignWorker, _TranslateWorker,
+  _SetlistAssignWorker, _TranslateWorker, _EndpointProbe, _RecalcWorker,
 )
 
 MEDIA_FILTER = "Media files (*.mkv *.mp4 *.webm *.m4a *.mp3 *.wav *.flac *.ogg *.opus *.avi);;All files (*)"
@@ -64,6 +64,8 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._prepare_worker = None  # _PrepareWorker
     self._embed_worker = None
     self._translate_worker = None
+    self._llm_probe = None
+    self._llm_alive = False
     # ASR runs out-of-process (QProcess): a torch/CUDA/native crash kills only the
     # child, never this GUI. Its output is streamed to the log; a tail is kept for
     # the failure dialog.
@@ -116,6 +118,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
 
     build_actions(self)
     self._build_playback_toolbar()
+    self.probe_llm()
 
     if session_only:
       self.load_session(session_only)
@@ -585,10 +588,6 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     from ..core.romanize import detect, set_default_locale
     set_default_locale(detect("\n".join(c[2] for c in sess.get("cues", []) if len(c) > 2)))
     self._romaji = sess.get("romaji", True)
-    if sess.get("offset") is not None:
-      self._offset_spin.setValue(sess["offset"])
-    if sess.get("lead") is not None:
-      self._lead_spin.setValue(sess["lead"])
     self._regions = [Region.from_dict(r) for r in sess.get("regions", [])]
     self._region_metas = sess.get("region_metas", [])
     self._manual_edits = sess.get("manual_edits") or self._manual_edits
@@ -827,8 +826,9 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._export_lrc_act.setEnabled(True)
 
   def _set_align_busy(self, busy):
-    """Grey the three align entry points while one of them owns the worker."""
-    for act in (self._align_all_act, self._align_region_act, self._lrc_as_is_act):
+    """Grey the align entry points while one of them owns the worker."""
+    for act in (self._align_all_act, self._align_region_act, self._lrc_as_is_act,
+                self._recalc_act, self._recalc_blank_act, self._recalc_all_act):
       act.setEnabled(not busy)
 
   def _start_worker(self, worker, done_slot):
@@ -986,6 +986,61 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._export_ass_act.setEnabled(True)
     self._export_lrc_act.setEnabled(True)
 
+  # --- recalc selected cue syllables ---
+
+  def _on_recalc_selected(self, rows=None):
+    """Recalc syllables for the selected cue(s): CTC-align each cue's text inside
+    its current bounds to fill token_spans + score. Bounds stay put. Off-thread
+    (model load + forced_align exceed 0.5s)."""
+    if self._worker_thread is not None or not self._media_path:
+      return
+    from ..core.ctc_align import ctc_available
+    cues = self._timeline.canvas.cues
+    if self._audio is None:
+      self._say("  syllables: no audio loaded")
+      return
+    if not ctc_available():
+      self._say("  syllables: no CTC aligner (torchaudio missing)")
+      return
+    rows = [r for r in (rows or self._timeline.grid.selected_rows())
+            if 0 <= r < len(cues)]
+    if not rows:
+      self._say("  syllables: no cue selected")
+      return
+    from dataclasses import replace
+    jobs = [(idx, replace(cues[idx])) for idx in rows]
+    print(f"\n=== Recalc syllables: {len(jobs)} cue(s)")
+    self._set_align_busy(True)
+    self._start_worker(_RecalcWorker(self._audio, 16000, jobs),
+                       self._on_recalc_done)
+
+  def _on_recalc_done(self, results):
+    """Apply worker results on the main thread: adopt token_spans + score only
+    (bounds unchanged), push one undo step per cue, log the conf."""
+    import math
+    from dataclasses import replace
+    canvas = self._timeline.canvas
+    cues = canvas.cues
+    changed = False
+    for idx, res in results or []:
+      if idx >= len(cues):
+        continue
+      if res is None:
+        print(f"  syllables: cue {idx + 1} no match")
+        continue
+      old = replace(cues[idx])
+      new = replace(cues[idx], score=res.score, token_spans=res.token_spans,
+                    confidence="fa")
+      cues[idx] = new
+      canvas.undo_stack.push(('timing', idx, old, replace(new)))
+      conf = round(100 * min(1.0, math.exp(res.score)))
+      print(f"  syllables cue {idx + 1}: conf {conf}%")
+      changed = True
+    if changed:
+      canvas._mark_dirty()
+      self._timeline.grid.rebuild()
+      canvas.update()
+
   # --- save / export ---
 
   def _on_save(self):
@@ -1034,20 +1089,14 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     if not need:
       self._write_ass(shown)
       return
-    from ..core.translate import endpoint_alive, ENDPOINT_DEFAULT
-    from .util import settings
-    st = settings()
-    endpoint = st.value("translate/endpoint", ENDPOINT_DEFAULT, str) or ENDPOINT_DEFAULT
-    if not endpoint_alive(endpoint):
-      reply = QMessageBox.question(
-        self, "Translate",
-        f"llama-server not reachable at {endpoint}. Export without translation?",
-        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-      if reply != QMessageBox.Yes:
-        return
+    if not self._llm_alive:
+      print(f"  LLM endpoint {self._llm_endpoint()} down, exporting without translation")
       self._write_ass(shown)
       return
     from ..core.translate import MODEL_DEFAULT, TARGET_DEFAULT
+    from .util import settings
+    st = settings()
+    endpoint = self._llm_endpoint()
     target = st.value("translate/target", TARGET_DEFAULT, str) or TARGET_DEFAULT
     model = st.value("translate/model", MODEL_DEFAULT, str) or ""
     self._tr_need = need
@@ -1059,6 +1108,29 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._translate_worker.done.connect(self._on_translate_done)
     self._translate_worker.error.connect(self._on_translate_error)
     self._translate_worker.start()
+
+  @staticmethod
+  def _llm_endpoint():
+    from ..core.translate import ENDPOINT_DEFAULT
+    from .util import settings
+    return settings().value("translate/endpoint", ENDPOINT_DEFAULT, str) or ENDPOINT_DEFAULT
+
+  def probe_llm(self):
+    """Check the LLM endpoint in the background, at startup and after Settings,
+    so Export ASS never waits on a dead server."""
+    if self._llm_probe is not None and self._llm_probe.isRunning():
+      return
+    self._llm_probe = _EndpointProbe(self._llm_endpoint())
+    self._llm_probe.done.connect(self._on_llm_probe)
+    self._llm_probe.start()
+
+  def _on_llm_probe(self, alive):
+    self._llm_alive = bool(alive)
+    state = "up" if alive else "down"
+    print(f"  LLM endpoint {self._llm_endpoint()}: {state}")
+    self._tr_status_act.setText(f"LLM: {state}")
+    self._tr_status_act.setIcon(
+      theme.icon("st_found", theme.PLAY_GREEN if alive else theme.STOP_RED))
 
   def _on_translate_done(self, result):
     self._translate_worker = None
@@ -1122,6 +1194,10 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._align_region_act.setEnabled(has_assignment and not busy)
     has_lrc = any(getattr(ch[1], "lrc", "") for ch in self._region_chosen.values())
     self._lrc_as_is_act.setEnabled(bool(self._media_path) and has_lrc and not busy)
+    has_cues = bool(self._timeline.canvas.cues)
+    self._recalc_act.setEnabled(has_cues and not busy)
+    self._recalc_blank_act.setEnabled(has_cues and not busy)
+    self._recalc_all_act.setEnabled(has_cues and not busy)
 
   # --- cleanup ---
 

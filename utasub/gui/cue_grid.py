@@ -2,10 +2,10 @@
 import math
 from dataclasses import replace
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QItemSelectionModel
 from PySide6.QtGui import QBrush
 from PySide6.QtWidgets import (
-  QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+  QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu,
 )
 
 from . import theme
@@ -14,8 +14,8 @@ from .timeline_util import romaji_for, fmt_time_mssff, parse_time, MIN_CUE_LEN_S
 CONF_HINT = (
   "Conf: how sure the CTC aligner was of this line's own stamp.\n"
   "Blank means no stamp survived and the line was placed by warp + onset snap.\n"
-  "Amber rows are under 20%, or this song's bottom 10% when the rest is clean: "
-  "Alt+N / Alt+P jump between them.")
+  "Amber rows are this song's bottom 10%, relative because a speech aligner\n"
+  "scores all singing low: Alt+N / Alt+P jump between them.")
 
 class CueGrid(QTableWidget):
   """Editable cue list: # | start | end | conf | text | romaji."""
@@ -23,6 +23,7 @@ class CueGrid(QTableWidget):
   cue_edited = Signal(int, object)   # (idx, new_cue) after inline edit
   selection_sync = Signal(int)       # row selected by user click
   editing_changed = Signal(bool)     # inline cell editor opened / closed
+  recalc_requested = Signal(list)    # row indices to re-stamp via CTC
 
   COL_NUM = 0
   COL_START = 1
@@ -36,7 +37,7 @@ class CueGrid(QTableWidget):
     self.setHorizontalHeaderLabels(["#", "Start", "End", "Conf", "Text", "Romaji"])
     self.horizontalHeader().setToolTip(CONF_HINT)
     self.setSelectionBehavior(QAbstractItemView.SelectRows)
-    self.setSelectionMode(QAbstractItemView.SingleSelection)
+    self.setSelectionMode(QAbstractItemView.ExtendedSelection)
     # Text stays user-resizable; Romaji absorbs the leftover width
     self.horizontalHeader().setSectionResizeMode(self.COL_TEXT, QHeaderView.Interactive)
     self.horizontalHeader().setSectionResizeMode(self.COL_ROMAJI, QHeaderView.Stretch)
@@ -118,7 +119,9 @@ class CueGrid(QTableWidget):
   def _conf_brush(self, row):
     """Conf-cell background for a row, amber below this song's cut."""
     score = getattr(self._cues[row], "score", None) if row < len(self._cues) else None
-    low = score is not None and self._conf_cut is not None and score < self._conf_cut
+    if score is None:
+      return QBrush(theme.CONF_NONE_BG)
+    low = self._conf_cut is not None and score < self._conf_cut
     return QBrush(theme.CONF_LOW_BG) if low else QBrush(Qt.NoBrush)
 
   def _conf_item(self, cue):
@@ -133,12 +136,14 @@ class CueGrid(QTableWidget):
     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
     if score is None:
       item.setForeground(QBrush(theme.DIM))
+      item.setBackground(QBrush(theme.CONF_NONE_BG))
+      item.setToolTip("no stamp: Recalc syllables to fill karaoke timing")
       return item
     low = self._conf_cut is not None and score < self._conf_cut
     item.setForeground(QBrush(theme.CONF_LOW if low else theme.GRAY))
     if low:
       item.setBackground(QBrush(theme.CONF_LOW_BG))
-      item.setToolTip("low: under 20%, or this song's bottom 10%, worth a listen")
+      item.setToolTip("low: this song's bottom 10%, worth a listen")
     return item
 
   def update_row(self, idx):
@@ -177,8 +182,50 @@ class CueGrid(QTableWidget):
       self.clearSelection()
       return
     self._syncing = True
-    self.setCurrentCell(idx, 0)
+    # a multi-selection that already holds the row is kept: the canvas echo of
+    # a Shift/Ctrl click must not collapse it back to one row
+    held = any(ix.row() == idx for ix in self.selectionModel().selectedRows())
+    self.setCurrentCell(idx, 0, QItemSelectionModel.NoUpdate if held
+                        else QItemSelectionModel.ClearAndSelect
+                        | QItemSelectionModel.Rows)
     self._syncing = False
+
+  def selected_rows(self):
+    """Selected row indices, ascending; the current row when nothing is selected."""
+    rows = sorted(ix.row() for ix in self.selectionModel().selectedRows())
+    if not rows and self.currentRow() >= 0:
+      rows = [self.currentRow()]
+    return rows
+
+  def mousePressEvent(self, ev):
+    """Right-click on a row already in the selection keeps the selection, so
+    the context menu acts on every row that was picked."""
+    idx = self.indexAt(ev.pos())
+    if ev.button() == Qt.RightButton and idx.isValid() and any(
+        ix.row() == idx.row() for ix in self.selectionModel().selectedRows()):
+      return
+    super().mousePressEvent(ev)
+
+  def contextMenuEvent(self, ev):
+    """Right-click menu on the cue rows: re-stamp the selected cue(s)."""
+    if self._provisional:
+      return
+    rows = self.selected_rows()
+    if not rows:
+      return
+    menu = QMenu(self)
+    act = menu.addAction("Recalc syllables")
+    blank = [r for r in range(len(self._cues))
+             if getattr(self._cues[r], "score", None) is None]
+    act_blank = menu.addAction("Recalc syllables (blank only)")
+    act_all = menu.addAction("Recalc syllables (all)")
+    chosen = menu.exec(ev.globalPos())
+    if chosen is act:
+      self.recalc_requested.emit(rows)
+    elif chosen is act_blank and blank:
+      self.recalc_requested.emit(blank)
+    elif chosen is act_all:
+      self.recalc_requested.emit(list(range(len(self._cues))))
 
   def _on_current_changed(self, row, col, prev_row, prev_col):
     """User clicked a different row: emit for canvas sync."""
