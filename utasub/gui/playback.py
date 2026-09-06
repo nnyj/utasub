@@ -1,10 +1,10 @@
 """Playback for MainWindow: media player setup, playhead sync, plus the
 playback toolbar (play button, region bounds, SRT offset/lead).
 Space / T live as menu actions in actions.py."""
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, Qt
 from PySide6.QtWidgets import (
   QToolBar, QPushButton, QLineEdit, QLabel, QDoubleSpinBox, QCheckBox,
-  QToolButton, QMenu,
+  QToolButton, QMenu, QSlider,
 )
 
 from ..core import export as export_mod
@@ -13,9 +13,9 @@ from .timeline_util import LEAD_IN_S
 from .util import settings
 
 try:
-  from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+  from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QAudio
 except ImportError:  # QtMultimedia optional: playback disabled if absent
-  QMediaPlayer = QAudioOutput = None
+  QMediaPlayer = QAudioOutput = QAudio = None
 
 class PlaybackMixin:
   """Playback toolbar + transport. Mixed into MainWindow, uses its state."""
@@ -31,6 +31,16 @@ class PlaybackMixin:
     self._play_region_btn.clicked.connect(self._on_play_region)
     self._set_play_icon(False)
     play_tb.addWidget(self._play_region_btn)
+
+    self._volume_slider = QSlider(Qt.Horizontal)
+    self._volume_slider.setRange(0, 100)
+    self._volume_slider.setMaximumWidth(90)
+    self._volume_slider.setToolTip("Volume")
+    self._volume_slider.setValue(int(settings().value("playback/volume", 80, int)))
+    self._volume_slider.valueChanged.connect(self._on_volume)
+    self._volume_slider.setEnabled(QAudioOutput is not None)
+    play_tb.addWidget(self._volume_slider)
+    play_tb.addSeparator()
 
     play_tb.addWidget(QLabel("Region start:"))
     self._region_start_edit = QLineEdit()
@@ -112,6 +122,20 @@ class PlaybackMixin:
     spin.setToolTip(tooltip)
     return spin
 
+  @staticmethod
+  def _linear_volume(v):
+    """Perceptual slider (0..100) to linear QAudioOutput volume (0..1)."""
+    frac = v / 100
+    if QAudio is None:
+      return frac
+    return QAudio.convertVolume(
+      frac, QAudio.LogarithmicVolumeScale, QAudio.LinearVolumeScale)
+
+  def _on_volume(self, v):
+    settings().setValue("playback/volume", v)
+    if getattr(self, "_audio_output", None) is not None:
+      self._audio_output.setVolume(self._linear_volume(v))
+
   def set_region_bounds(self, region):
     """Show the active region's bounds, or blank + disabled with no region, so
     Apply bounds is never armed with nothing to apply."""
@@ -140,6 +164,7 @@ class PlaybackMixin:
       self._player = QMediaPlayer()
       self._audio_output = QAudioOutput()
       self._player.setAudioOutput(self._audio_output)
+      self._audio_output.setVolume(self._linear_volume(self._volume_slider.value()))
       self._player.setSource(QUrl.fromLocalFile(str(self._media_path)))
       # positionChanged lands every ~50ms on the Qt6 backend, close enough to
       # drive the playhead without a second timer polling position()
