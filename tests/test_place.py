@@ -333,15 +333,13 @@ def test_low_conf_cut_is_a_per_song_percentile():
 def test_low_conf_cut_ignores_unstamped_cues():
   assert low_conf_cut([0.9, None, 0.8, None, 0.7, 0.6, 0.5]) == 0.5
 
-def test_low_conf_cut_flags_a_song_that_is_bad_all_through():
-  """A pure percentile flags a tenth of every song, however good or bad it is.
-  Under the absolute floor a badly stamped song flags all of it, and a handful
-  of stamps still gets a verdict instead of nothing."""
+def test_low_conf_cut_is_relative_only():
+  """A loud sung track scores every line low, so no absolute floor: a uniformly
+  bad song flags nothing, and under 5 stamps there is no ranking at all."""
   import math
-  floor = math.log(0.2)
   bad = [math.log(0.1)] * 20
-  assert sum(1 for s in bad if s < low_conf_cut(bad)) == 20, "only a tenth flagged"
-  assert low_conf_cut([0.9, 0.2, 0.5]) == floor, "too few to rank, floor still applies"
+  assert sum(1 for s in bad if s < low_conf_cut(bad)) == 0, "absolute floor crept back"
+  assert low_conf_cut([0.9, 0.2, 0.5]) is None, "too few to rank"
   assert low_conf_cut([None] * 20) is None
 
 def test_ctc_evidence_lands_only_on_adopted_lines(monkeypatch):

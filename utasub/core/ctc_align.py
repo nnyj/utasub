@@ -22,9 +22,6 @@ SR = 16000
 # stays one forced_align over the concatenated emission
 EMIT_CHUNK, EMIT_CTX = 30.0, 1.5
 GATE_PCT = 10  # drop this % of lines by mean token log-prob before direct use
-# score thresholds, as per-token probabilities (exp of the stored log-prob)
-CONF_FLOOR = 0.2        # under this the stamp is bad whatever the song sounds like
-CONF_GOOD_MEDIAN = 0.5  # over this the song is clean, so ranking beats the floor
 
 _model_cache = []
 _available = None
@@ -140,22 +137,15 @@ def align_lines(texts, audio, sr=SR):
 # ━━━━━━ confidence gate ━━━━━━
 
 def low_conf_cut(scores, pct=GATE_PCT):
-  """Score below which a cue is worth a second look, in mean-token-log-prob.
-
-  Two rules, whichever is higher:
-    absolute  exp(score) under CONF_FLOOR is a bad stamp in any mix, so a song
-              where everything is bad flags everything, not a tenth of it;
-    relative  the bottom pct% of this song, but only when the song is good
-              (median exp(score) over CONF_GOOD_MEDIAN) and at least 5 cues are
-              scored, so a clean align does not paint a tenth of itself amber.
-  None when nothing carries a score. `scores` is any iterable, None ignored."""
+  """Score below which a cue is worth a second look, in mean-token-log-prob:
+  the bottom pct% of this song. Relative only: MMS_FA is a speech model, so a
+  loud sung track scores every line low and an absolute floor would flag all of
+  it. None with fewer than 5 scored cues, too few to rank. `scores` is any
+  iterable, None ignored."""
   vals = sorted(s for s in scores if s is not None)
-  if not vals:
+  if len(vals) < 5:
     return None
-  cut = math.log(CONF_FLOOR)
-  if len(vals) >= 5 and statistics.median(vals) > math.log(CONF_GOOD_MEDIAN):
-    cut = max(cut, vals[min(len(vals) - 1, int(pct / 100.0 * len(vals)))])
-  return cut
+  return vals[min(len(vals) - 1, int(pct / 100.0 * len(vals)))]
 
 def gate(stamps, scores, pct=GATE_PCT):
   """Drop the lowest pct% of lines by confidence. One per-song percentile,
