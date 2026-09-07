@@ -40,6 +40,7 @@ class PlaybackMixin:
     self._play_region_btn = QPushButton()
     self._play_region_btn.setMaximumWidth(48)
     self._play_region_btn.clicked.connect(self._on_play_region)
+    self._play_region_btn.setEnabled(False)  # armed once a player exists
     self._set_play_icon(False)
     play_tb.addWidget(self._play_region_btn)
 
@@ -173,6 +174,8 @@ class PlaybackMixin:
 
   def _setup_playback(self):
     """QMediaPlayer shared across tabs. Graceful degrade."""
+    self._playback_ok = False
+    self._play_region_btn.setEnabled(False)
     if not self._media_path or QMediaPlayer is None:
       return
     try:
@@ -189,6 +192,7 @@ class PlaybackMixin:
     except Exception as e:
       print(f"  playback unavailable ({e})")
       self._player = None
+    self._play_region_btn.setEnabled(self._playback_ok)
 
   def _on_playback_state(self, state):
     """Reset the button when playback stops on its own (end of media)."""

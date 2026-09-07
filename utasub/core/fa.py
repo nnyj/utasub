@@ -1,9 +1,7 @@
 """Forced alignment via Qwen3-ForcedAligner-0.6B. Stamps known lyric text against
 audio per section, refining coarse line starts. Absence of qwen_asr degrades with
 message, never crashes."""
-import re
-import unicodedata
-
+from .align import norm_key
 from .romanize import detect, get_default_locale
 
 _aligner_cache = []
@@ -42,11 +40,6 @@ def load_aligner():
       "Qwen/Qwen3-ForcedAligner-0.6B", dtype=dtype, device_map=device))
   return _aligner_cache[0]
 
-def _norm_key(t):
-  """Lowercase NFKC, keep digits+ascii+kana+kanji only."""
-  return re.sub(r"[^0-9a-z぀-ヿ一-鿿]", "",
-                unicodedata.normalize("NFKC", t).lower())
-
 def _split_sections(starts, gap=4.0, max_span=150.0):
   """Group line indices into sections split at start gaps > gap or span > max_span."""
   secs = []
@@ -74,7 +67,7 @@ def force_align_lines(starts, texts, audio, sr=16000, pre_pad=5.0, post_pad=10.0
   L = len(starts)
   song_locale = get_default_locale()  # song-level pin, per-section detect fallback
   # precompute norm keys per line (avoids recompute on context-overlap lines)
-  norm_keys = [_norm_key(texts[j]) for j in range(L)]
+  norm_keys = [norm_key(texts[j]) for j in range(L)]
 
   for sec in secs:
     # context lines: neighbors whose voice must be in aligned text to avoid edge drift
@@ -94,6 +87,8 @@ def force_align_lines(starts, texts, audio, sr=16000, pre_pad=5.0, post_pad=10.0
     metas.append((seq, set(sec), w0))
 
   new_s, new_e = {}, {}
+  if not batch_audio:
+    return new_s, new_e
   results = aligner.align(audio=batch_audio, text=batch_text, language=batch_lang)
   for (seq, want, w0), res in zip(metas, results):
     keys = [norm_keys[j] for j in seq]
@@ -104,7 +99,7 @@ def force_align_lines(starts, texts, audio, sr=16000, pre_pad=5.0, post_pad=10.0
     li = 0
     got_s, got_e, got_e_raw = {}, {}, {}
     for it in res.items:
-      tl = len(_norm_key(it.text))
+      tl = len(norm_key(it.text))
       if not tl:
         continue
       while li + 1 < len(seq) and bounds[li + 1] <= acc:
@@ -130,7 +125,7 @@ def force_align_lines(starts, texts, audio, sr=16000, pre_pad=5.0, post_pad=10.0
       continue
     # plausibility gates:
     # 1. singable rate <25 norm chars/s (collapsed stamps)
-    # 2. coarse drift <4s (wrong-occurrence matches on repeated lyrics)
+    # 2. coarse drift within drift_gate (wrong-occurrence matches on repeated lyrics)
     js = [j for j in seq if j in got_s]
     for i, j in enumerate(js):
       if j not in want:

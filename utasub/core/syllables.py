@@ -9,16 +9,14 @@ MIN_WIN = 0.3  # a window shorter than this can't be aligned (align_lines floor)
 
 SyllableResult = namedtuple("SyllableResult", "score token_spans")
 
-def ctc_line(text, audio_win, sr=16000):
-  """Real single-line aligner: (start, end, score, [(char, start, end)]) in
-  window-local seconds, or None when nothing stamps. Wraps the global CTC pass
-  over one line so the module-level token spans come back for the karaoke fill."""
-  from . import ctc_align
-  starts, ends, scores = ctc_align.align_lines([text], audio_win, sr)
+def ctc_line(text, audio_win):
+  """Real single-line aligner over 16k audio: (start, end, score,
+  [(char, start, end)]) in window-local seconds, or None when nothing stamps."""
+  from .ctc_align import align_lines
+  starts, ends, scores, spans = align_lines([text], audio_win)
   if 0 not in starts:
     return None
-  # read through the module: align_lines rebinds last_token_spans on each call
-  return starts[0], ends[0], scores.get(0), ctc_align.last_token_spans.get(0, [])
+  return starts[0], ends[0], scores.get(0), spans.get(0, [])
 
 def syllabize_cue(cue, audio, sr, aligner=ctc_line):
   """CTC-align cue text inside [cue.start, cue.end] and return a SyllableResult

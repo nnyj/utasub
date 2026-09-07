@@ -193,7 +193,8 @@ def _cache_read(hints, fresh=False):
     return None
   try:
     return json.loads(path.read_text(encoding="utf-8"))
-  except Exception:
+  except (OSError, json.JSONDecodeError) as e:
+    print(f"  setlist cache unreadable: {path}: {e}")
     return None
 
 def _cache_save(hints, data):

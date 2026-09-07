@@ -605,18 +605,31 @@ class TimelinePanel(QWidget):
 
   # --- save ---
 
+  def _sync_session_cues(self):
+    """Push current cues + manual edits into the session dict. Returns
+    (cues, edits), or None when the timeline is provisional or has no media."""
+    if self._provisional or not self._media_path:
+      return None
+    cues = list(self.canvas.cues)
+    edits = self._collect_edits(cues)
+    self._session["manual_edits"] = edits
+    self._session["cues"] = cues
+    return cues, edits
+
+  def export_srt(self):
+    """Write SRT from the current cues. Session file untouched."""
+    if self._sync_session_cues() is None:
+      return False
+    sess_mod.reexport(self._media_path, self._session)
+    return True
+
   def save(self, export=True):
     """Save manual edits + cues to session; re-export SRT when export=True.
     Returns True on success."""
-    if self._provisional:
-      return False  # provisional display is not persisted
-    if not self._media_path:
+    synced = self._sync_session_cues()
+    if synced is None:
       return False
-    cues = self.canvas.cues
-    edits = self._collect_edits(cues)
-    self._session["manual_edits"] = edits
-
-    self._session["cues"] = list(cues)
+    cues, edits = synced
 
     sess_mod.save(
       self._media_path,

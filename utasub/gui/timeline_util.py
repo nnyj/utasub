@@ -94,7 +94,6 @@ NUDGE_S = 0.010         # arrow-key nudge step
 NUDGE_COARSE_S = 0.100  # Ctrl+arrow nudge step
 LEAD_IN_S = 1.0         # pre-roll when playing from the selected cue
 AUTO_ZOOM_PX = 120      # narrower than this on select and the view zooms in
-LABEL_ROMAJI_PX = 80    # cue block needs this much width for a second (romaji) row
 
 # --- time formatting ---
 

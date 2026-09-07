@@ -179,11 +179,15 @@ def _apply_extras(cue, extras):
   return cue
 
 def _read_raw(media_path):
-  """Parsed session file dict, or None when the file is missing."""
+  """Parsed session file dict, or None when the file is missing or unreadable."""
   path = session_path(media_path)
   if not path.exists():
     return None
-  return json.loads(path.read_text(encoding="utf-8"))
+  try:
+    return json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError) as e:
+    print(f"  session unreadable: {path}: {e}")
+    return None
 
 def _write_raw(media_path, data):
   """Atomic: the file holds the only copy of the cached ASR block and every
@@ -247,7 +251,10 @@ def save(media_path, *, candidates=None, chosen_index=None, cues=None,
     "media": Path(media_path).name,
     "chosen_index": chosen_index,
     "candidates": [_cand_dict(c) for c in (candidates or [])],
-    "cues": [list(c) if isinstance(c, (tuple, Cue)) else c for c in (cues or [])],
+    # Cue always writes 4 slots so confidence None still loads back as a Cue
+    # (keeps score/token_spans); plain ASR tuples keep their own length
+    "cues": [[c.start, c.end, c.text, c.confidence] if isinstance(c, Cue)
+             else list(c) if isinstance(c, tuple) else c for c in (cues or [])],
     "cue_meta": cue_meta if any(cue_meta) else [],
     "song_span": list(song_span) if song_span else None,
     "romaji": romaji,
@@ -276,11 +283,10 @@ def save(media_path, *, candidates=None, chosen_index=None, cues=None,
   return _write_raw(media_path, data)
 
 def load(media_path):
-  """Load session file. Returns dict or None if missing."""
-  path = session_path(media_path)
-  if not path.exists():
+  """Load session file. Returns dict or None if missing or unreadable."""
+  data = _read_raw(media_path)
+  if data is None:
     return None
-  data = json.loads(path.read_text(encoding="utf-8"))
   # media is stored as a basename, so an archive move keeps the session; a
   # rename still loads (the ASR block and the manual edits are the expensive
   # part) and only says so. Compared whole: song.mkv and song.flac in one folder
@@ -297,7 +303,7 @@ def load(media_path):
   raw_cues = []
   cue_meta = data.get("cue_meta") or []
   for i, c in enumerate(data.get("cues", [])):
-    if len(c) == 4 and isinstance(c[3], str):
+    if len(c) == 4 and (c[3] is None or isinstance(c[3], str)):
       extras = cue_meta[i] if i < len(cue_meta) else None
       raw_cues.append(_apply_extras(Cue(c[0], c[1], c[2], c[3]), extras))
     else:
@@ -308,9 +314,9 @@ def load(media_path):
   # best-effort migration: old session carries only positional timings.
   # File itself untouched until next save, which writes both forms.
   edits = data.get("manual_edits")
-  if not (edits or {}).get("timings") and data.get("manual_timings"):
-    edits = _migrate_manual_timings(data)
   edits = dict(edits or {})
+  if not edits.get("timings") and data.get("manual_timings"):
+    edits["timings"] = _migrate_manual_timings(data)["timings"]
   for k in EDIT_KINDS:
     edits.setdefault(k, [])
   data["manual_edits"] = edits

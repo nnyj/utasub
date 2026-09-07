@@ -118,6 +118,8 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
 
     build_actions(self)
     self._build_playback_toolbar()
+    self._timeline.canvas.dirty_changed.connect(self._refresh_save_action)
+    self._refresh_save_action()
     self.probe_llm()
 
     if session_only:
@@ -365,6 +367,10 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
 
   def _refresh_embed_action(self):
     self._embed_act.setEnabled(bool(self._find_exported_subs()))
+
+  def _set_export_enabled(self, on):
+    for act in (self._export_act, self._export_ass_act, self._export_lrc_act):
+      act.setEnabled(on)
     if hasattr(self, "_preview_act"):
       self._preview_act.setEnabled(self._find_exported_ass() is not None)
 
@@ -495,11 +501,8 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._exported = False
 
     # restore persisted strategies if a session exists and matches region count
-    try:
-      from ..core import session as sess_mod
-      sess = sess_mod.load(media_path)
-    except Exception:
-      sess = None
+    from ..core import session as sess_mod
+    sess = sess_mod.load(media_path)
     if sess:
       metas = sess.get("region_metas", [])
       if metas and len(metas) == len(self._regions):
@@ -547,9 +550,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._timeline.grid.load_cues([])
 
     self._refresh_region_actions()
-    self._export_act.setEnabled(False)
-    self._export_ass_act.setEnabled(False)
-    self._export_lrc_act.setEnabled(False)
+    self._set_export_enabled(False)
     self._refresh_embed_action()
 
     self._setup_playback()
@@ -612,9 +613,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._populate_region_list()
     self._setup_playback()
     self._tabs.setCurrentWidget(self._timeline)
-    self._export_act.setEnabled(True)
-    self._export_ass_act.setEnabled(True)
-    self._export_lrc_act.setEnabled(True)
+    self._set_export_enabled(True)
     self._refresh_embed_action()
 
     self._cleanup_prepare_thread()
@@ -821,9 +820,8 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._populate_region_list()
     self._timeline.load_cues(cues, regions=list(self._regions))
     self._tabs.setCurrentWidget(self._timeline)
-    self._export_act.setEnabled(True)
-    self._export_ass_act.setEnabled(True)
-    self._export_lrc_act.setEnabled(True)
+    self._timeline.canvas._set_dirty(True)  # fresh alignment is unsaved
+    self._set_export_enabled(True)
 
   def _set_align_busy(self, busy):
     """Grey the align entry points while one of them owns the worker."""
@@ -874,9 +872,8 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
       self._populate_region_list()
       self._timeline.load_cues(all_cues, regions=list(self._regions))
       self._tabs.setCurrentWidget(self._timeline)
-      self._export_act.setEnabled(True)
-      self._export_ass_act.setEnabled(True)
-      self._export_lrc_act.setEnabled(True)
+      self._timeline.canvas._set_dirty(True)  # fresh alignment is unsaved
+      self._set_export_enabled(True)
     else:
       print("\n=== Align finished (no result)")
 
@@ -982,9 +979,8 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._populate_region_list()
     self._timeline.load_cues(merged, regions=list(self._regions))
     self._tabs.setCurrentWidget(self._timeline)
-    self._export_act.setEnabled(True)
-    self._export_ass_act.setEnabled(True)
-    self._export_lrc_act.setEnabled(True)
+    self._timeline.canvas._set_dirty(True)  # fresh alignment is unsaved
+    self._set_export_enabled(True)
 
   # --- recalc selected cue syllables ---
 
@@ -1050,12 +1046,16 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
       print("  saved session")
 
   def _on_export(self):
-    """Write SRT from current timeline cues + save session (Export SRT action)."""
+    """Write SRT from current timeline cues (Export SRT action). Session untouched."""
     self._refresh_timeline_session_meta()
-    if self._timeline.save(export=True):
+    if self._timeline.export_srt():
       self._exported = True
       self._refresh_embed_action()
-      print("  exported SRT + saved session")
+      print("  exported SRT")
+
+  def _refresh_save_action(self, *_):
+    """Save is armed only by unsaved timeline edits on a loaded file."""
+    self._save_act.setEnabled(bool(self._media_path) and self._timeline.canvas.dirty)
 
   def _on_export_ass(self):
     """Write styled .ass from current timeline cues (romaji over dimmed original).
@@ -1218,11 +1218,13 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
       if not self._worker_thread.wait(3000):
         print("  closing while a job is still running")
     if self._prepare_worker is not None and self._prepare_worker.isRunning():
+      self._prepare_worker.blockSignals(True)
       self._prepare_worker.wait(3000)
     if self._transcribe_proc is not None:
       self._transcribe_proc.kill()
       self._transcribe_proc.waitForFinished(2000)
     if self._embed_worker is not None and self._embed_worker.isRunning():
+      self._embed_worker.blockSignals(True)
       self._embed_worker.wait(3000)
     if self._translate_worker is not None and self._translate_worker.isRunning():
       self._translate_worker.blockSignals(True)

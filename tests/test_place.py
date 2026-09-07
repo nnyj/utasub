@@ -40,10 +40,10 @@ def _patch_ctc(monkeypatch, truth, score=-0.5):
   """Stand in for the global CTC pass: stamps every line at its true time."""
   from utasub.core import ctc_align
 
-  def _align_lines(texts, audio, sr=16000):
+  def _align_lines(texts, audio):
     return ({j: t for j, t in enumerate(truth)},
             {j: t + 2.0 for j, t in enumerate(truth)},
-            {j: score for j, _ in enumerate(truth)})
+            {j: score for j, _ in enumerate(truth)}, {})
   monkeypatch.setattr(ctc_align, "align_lines", _align_lines)
   monkeypatch.setattr(ctc_align, "ctc_available", lambda: True)
 
@@ -146,29 +146,28 @@ def test_collect_returns_the_global_pass_ungated(monkeypatch):
   lines = _make_lines(20, spacing=5.0)
   truth = [t + _fa_offset for t, _ in lines]
   _patch_ctc(monkeypatch, truth)
-  from utasub.core.anchors import collect
   from utasub.core import ctc_align
+  from utasub.core.place import AlignOpts, run_chain
 
   # one bad-confidence line: still an anchor, and still gated out of direct use
-  def _align_lines(texts, audio, sr=16000):
+  def _align_lines(texts, audio):
     return ({j: t for j, t in enumerate(truth)},
             {j: t + 2.0 for j, t in enumerate(truth)},
-            {j: (-9.0 if j == 4 else -0.5) for j in range(len(truth))})
+            {j: (-9.0 if j == 4 else -0.5) for j in range(len(truth))}, {})
   monkeypatch.setattr(ctc_align, "align_lines", _align_lines)
+  _patch_fa(monkeypatch, _fa_truth(truth))
+  cues, _, meta = run_chain(lines, _make_segments(lines), _fake_audio(200.0),
+                            AlignOpts(use_fa=True))
+  assert meta["strategy"] == "lrc_warp", meta
+  assert meta["stamps"] == 20 and meta["aligner"] == "ctc"
+  assert meta["gated"] == 19, "gate kept the low-confidence line"
 
-  lrc = [t for t, _ in lines]
-  cands, (starts, ends, scores) = collect(lrc, [t for _, t in lines], _fake_audio())
-  assert len(cands) == 1, f"expected one anchor set, got {len(cands)}"
-  anchors, diag = cands[0]
-  assert len(anchors) == 20 and diag["aligner"] == "ctc"
-  assert anchors == sorted(anchors), "anchors not in line order"
-  assert 4 not in ctc_align.gate(starts, scores), "gate kept the low-confidence line"
-  assert len(ends) == 20
-
-  # too few stamps to fit: no candidate, bundle still returned
+  # too few stamps to fit: warp declines
   monkeypatch.setattr(ctc_align, "align_lines",
-                      lambda texts, audio, sr=16000: ({0: 1.0}, {0: 3.0}, {0: -0.5}))
-  assert collect(lrc, [t for _, t in lines], _fake_audio())[0] == []
+                      lambda texts, audio: ({0: 1.0}, {0: 3.0}, {0: -0.5}, {}))
+  _, _, meta = run_chain(lines, _make_segments(lines), _fake_audio(200.0),
+                         AlignOpts(use_fa=True))
+  assert meta["strategy"] != "lrc_warp", meta
 
 def test_adopt_fa_takes_gated_stamps_within_the_bound():
   """Every gated stamp near placement is taken outright; one a second away is
@@ -347,11 +346,9 @@ def test_ctc_evidence_lands_only_on_adopted_lines(monkeypatch):
   built from them would drift: only adopted stamps carry evidence."""
   from utasub.core import ctc_align, place
   from utasub.core.align import Cue
-  monkeypatch.setattr(ctc_align, "last_token_spans",
-                      {0: [("a", 10.0, 10.5), ("b", 10.5, 11.0)],
-                       1: [("c", 30.0, 30.4)]})
+  spans = {0: [("a", 10.0, 10.5), ("b", 10.5, 11.0)], 1: [("c", 30.0, 30.4)]}
   cues = [Cue(10.0, 12.0, "one", "lrc"), Cue(20.0, 22.0, "two", "lrc")]
-  place._attach_ctc_evidence(cues, {0}, {0: 0.9, 1: 0.3})
+  place._attach_ctc_evidence(cues, {0}, {0: 0.9, 1: 0.3}, spans)
   assert cues[0].score == 0.9
   assert getattr(cues[1], "score", None) is None
   assert getattr(cues[1], "token_spans", None) is None
@@ -360,10 +357,9 @@ def test_ctc_spans_are_stored_relative_to_the_cue_start(monkeypatch):
   """Stored absolute, a region offset or a hand drag would desync the fill."""
   from utasub.core import ctc_align, place
   from utasub.core.align import Cue
-  monkeypatch.setattr(ctc_align, "last_token_spans",
-                      {0: [("a", 10.2, 10.5), ("b", 10.5, 11.0)]})
+  spans = {0: [("a", 10.2, 10.5), ("b", 10.5, 11.0)]}
   cues = [Cue(10.0, 12.0, "one", "lrc")]
-  place._attach_ctc_evidence(cues, {0}, {0: 0.9})
+  place._attach_ctc_evidence(cues, {0}, {0: 0.9}, spans)
   assert cues[0].token_spans == [("a", 0.2, 0.5), ("b", 0.5, 1.0)]
 
 def test_plain_text_lines_get_ctc_evidence(monkeypatch):
@@ -375,15 +371,13 @@ def test_plain_text_lines_get_ctc_evidence(monkeypatch):
   lines = _make_lines(20, spacing=5.0)
   truth = [t + _fa_offset for t, _ in lines]
   segments = _make_segments(lines)
-  monkeypatch.setattr(ctc_align, "last_token_spans", {})
   monkeypatch.setattr(ctc_align, "ctc_available", lambda: True)
 
-  def _align_lines(texts, audio, sr=16000):
-    ctc_align.last_token_spans.update(
-      {j: [("a", t, t + 0.3), ("b", t + 0.3, t + 0.6)] for j, t in enumerate(truth)})
+  def _align_lines(texts, audio):
     return ({j: t for j, t in enumerate(truth)},
             {j: t + 2.0 for j, t in enumerate(truth)},
-            {j: -0.5 for j in range(len(truth))})
+            {j: -0.5 for j in range(len(truth))},
+            {j: [("a", t, t + 0.3), ("b", t + 0.3, t + 0.6)] for j, t in enumerate(truth)})
   monkeypatch.setattr(ctc_align, "align_lines", _align_lines)
   _patch_fa(monkeypatch, _fa_truth(truth))
 

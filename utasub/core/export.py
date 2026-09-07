@@ -477,7 +477,8 @@ def count_subtitle_streams(media_path):
       return 0
     data = json.loads((proc.stdout or b"").decode("utf-8", "replace"))
     return len(data.get("streams") or [])
-  except Exception:
+  except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError) as e:
+    print(f"  ffprobe subtitle count failed: {e}")
     return 0
 
 def embed_subs(media_path, sub_paths, out_path=None):

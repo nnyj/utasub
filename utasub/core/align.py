@@ -163,16 +163,15 @@ def coarse_map(segments, texts, locale=None):
 
 # --- coarse helpers ---
 
-def _safe_romaji_key(texts, locale=None):
-  """romaji_key per item, empty string on failure (e.g. Chinese chars cutlet chokes on).
-  Locale detected once over the whole batch, not per item."""
-  if locale is None:
-    locale = detect(" ".join(texts))
+def _safe_romaji_key(texts, locale):
+  """romaji_key per item, empty string on failure (e.g. Chinese chars cutlet
+  chokes on), the failure printed so a broken romanizer is not silent."""
   out = []
   for t in texts:
     try:
       out.append(romaji_key([t], locale=locale)[0])
-    except Exception:
+    except Exception as e:
+      print(f"  ! romanize failed on {t!r}: {e}")
       out.append("")
   return out
 
@@ -254,7 +253,6 @@ def split_outside(segments, start, end):
   post = [seg for seg in segments if seg[0] >= end]
   return pre, post
 
-CUE_GAP_S = 0.0  # gap left between a cue end and the next start (0 = seamless)
 UNVOICED_HOLD = 4.0   # cue length when the envelope finds no voice at the start
 LONG_GAP_S = 10.0     # an LRC interval this long is a break, not a sung phrase
 LONG_GAP_HOLD = 8.0   # ceiling for a line that precedes such a break
@@ -270,6 +268,10 @@ RATE_GUARD_SLACK = 3.0
 # it is wrong and a loose floor would undo it.
 RATE_FLOOR = 0.3
 
+def norm_key(t):
+  """Lowercase NFKC, keep digits+ascii+kana+kanji only."""
+  return re.sub(r"[^0-9a-z぀-ヿ一-鿿]", "", unicodedata.normalize("NFKC", t).lower())
+
 def build_cues(starts, texts, runs, ends_hint=None, confidence=None,
                durations=None):
   """Cues from monotonic starts.
@@ -281,8 +283,7 @@ def build_cues(starts, texts, runs, ends_hint=None, confidence=None,
   out = []
   # chars/sec from lines whose LRC interval is their real sung length (no break
   # after). Checks break lines only.
-  chars = [len(re.sub(r"[^0-9a-z぀-ヿ一-鿿]", "",
-                      unicodedata.normalize("NFKC", t).lower())) for t in texts]
+  chars = [len(norm_key(t)) for t in texts]
   rate = None
   if durations is not None:
     per = sorted(chars[j] / durations[j] for j in range(len(texts))
@@ -291,7 +292,7 @@ def build_cues(starts, texts, runs, ends_hint=None, confidence=None,
       rate = per[len(per) // 2]
 
   for j, s in enumerate(starts):
-    e0 = starts[j + 1] - CUE_GAP_S if j + 1 < len(starts) else s + 6.0
+    e0 = starts[j + 1] if j + 1 < len(starts) else s + 6.0
     conf = confidence[j] if confidence is not None else None
     if durations is None:
       e = max((ends_hint or {}).get(j, 0.0), walk_end(s, e0, runs))
@@ -389,7 +390,8 @@ def align_lyrics(segments, lines, audio=None, use_fa=False,
                  runs_lo=None, voiced_hi=None):
   """Coarse align lyrics onto ASR + envelope snap + optional forced alignment.
   Returns (cues, song_span_or_None) where cues = [(start, end, text[, confidence]), ...].
-  Confidence: 'fa' (fa-stamped), 'coarse' (coarse-only), 'interpolated' (non-decreasing fix).
+  Confidence: 'fa' (fa-stamped), 'coarse' (coarse-only), 'interpolated' (fa
+  stamp moved by the non-decreasing fix; coarse lines keep 'coarse').
   Song span replaces ASR text; ASR outside survives.
   runs_lo/voiced_hi: precomputed envelopes (avoids recomputation across strategies)."""
   texts = [t for _, t in lines]
@@ -405,7 +407,7 @@ def align_lyrics(segments, lines, audio=None, use_fa=False,
     voiced_hi = voiced_envelope(audio, gate=0.08, local=True)
   if audio is not None:
     dur = len(audio) / 16000
-    starts = [min(s, dur - 1.0) for s in starts]
+    starts = [max(0.0, min(s, dur - 1.0)) for s in starts]
 
   # trim unsung edge lines (credits/headers) when envelope available
   def sung(j):
@@ -430,18 +432,19 @@ def align_lyrics(segments, lines, audio=None, use_fa=False,
   fa_starts, fa_ends = {}, {}
   confidence = ["coarse"] * len(texts)
   if use_fa and audio is not None:
-    try:
-      from .fa import force_align_lines
-      fa_starts, fa_ends = force_align_lines(starts, texts, audio)
-      fa_count = len(fa_starts)
-      print(f"  fa: stamped {fa_count}/{len(texts)} lines")
-      # replace coarse starts where fa passed plausibility gate
-      for j in range(len(texts)):
-        if j in fa_starts:
-          starts[j] = fa_starts[j]
-          confidence[j] = "fa"
-    except Exception as e:
-      print(f"  fa: failed ({e}), keeping coarse")
+    # fa_available is import-safe: fa.py only pulls qwen_asr inside it
+    from .fa import fa_available, force_align_lines
+    if fa_available():
+      try:
+        fa_starts, fa_ends = force_align_lines(starts, texts, audio)
+        print(f"  fa: stamped {len(fa_starts)}/{len(texts)} lines")
+        # replace coarse starts where fa passed plausibility gate
+        for j in range(len(texts)):
+          if j in fa_starts:
+            starts[j] = fa_starts[j]
+            confidence[j] = "fa"
+      except Exception as e:
+        print(f"  fa: failed ({e}), keeping coarse")
 
   # force non-decreasing after fa merge
   for j in range(1, len(starts)):

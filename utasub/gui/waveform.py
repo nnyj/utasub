@@ -13,7 +13,7 @@ from .timeline_util import (
   romaji_for, find_onsets, UndoStack, fmt_tick, TICK_STEPS,
   DRAG_NONE, DRAG_MOVE, DRAG_LEFT, DRAG_RIGHT, DRAG_PAN, DRAG_REGION,
   EDGE_THRESH_PX, NEIGHBOR_SNAP_PX, REGION_THRESH_PX, MIN_REGION_S,
-  MIN_CUE_LEN_S, MIN_CUE_GAP_S, ONSET_SNAP_S, LABEL_ROMAJI_PX,
+  MIN_CUE_LEN_S, MIN_CUE_GAP_S, ONSET_SNAP_S,
 )
 
 def as_cue(c, default_conf=None):
@@ -33,6 +33,7 @@ class WaveformCanvas(QWidget):
   """Custom paint widget: waveform + cue block lane."""
 
   cue_changed = Signal()    # emitted after any cue edit
+  dirty_changed = Signal(bool)  # unsaved-edits flag flipped
   selection_changed = Signal(int)  # emitted with selected cue index
   seek_requested = Signal(float)   # click-scrub time
   region_changed = Signal(int)     # emitted with region index after boundary drag
@@ -380,8 +381,13 @@ class WaveformCanvas(QWidget):
     self._mark_dirty()
     return True
 
+  def _set_dirty(self, on):
+    if self._dirty != on:
+      self._dirty = on
+      self.dirty_changed.emit(on)
+
   def _mark_dirty(self):
-    self._dirty = True
+    self._set_dirty(True)
     self.cue_changed.emit()
     self.update()
 
@@ -390,7 +396,7 @@ class WaveformCanvas(QWidget):
     return self._dirty
 
   def clear_dirty(self):
-    self._dirty = False
+    self._set_dirty(False)
 
   # --- structural edits (insert/remove/split/merge) ---
 
@@ -707,7 +713,7 @@ class WaveformCanvas(QWidget):
       c = self.cues[idx]
       self.cues[idx] = replace(c, end=new_end)
 
-    self._dirty = True
+    self._set_dirty(True)
     self.update()
 
   def mouseReleaseEvent(self, ev: QMouseEvent):
@@ -922,7 +928,7 @@ class WaveformCanvas(QWidget):
     p.drawRect(x1, lane_y + 1, bw, self.CUE_LANE_H - 2)
 
     fm = p.fontMetrics()
-    rom = romaji_for(c.text) if bw > LABEL_ROMAJI_PX else ""
+    rom = romaji_for(c.text)
     if rom:
       baseline = lane_y + 4 + fm.ascent()
     else:

@@ -90,18 +90,17 @@ def _adopt_fa(starts, fa_stamps, bound=ADOPT_MAX, adopted=None):
         adopted.add(j)
   return monotonic(out)
 
-def _attach_ctc_evidence(cues, adopted, scores):
+def _attach_ctc_evidence(cues, adopted, scores, token_spans):
   """Hang the CTC score and per-token spans on the cues whose stamp was
   adopted. Only those: on a snapped line the spans time a stretch of audio a
   snapped cue moved off, so a karaoke fill built from them would drift.
   Spans are stored relative to the cue start, so a later region offset or a
   hand drag carries them along."""
-  from .ctc_align import last_token_spans
   for j in adopted:
     if not (0 <= j < len(cues)):
       continue
     cues[j].score = scores.get(j)
-    spans = last_token_spans.get(j)
+    spans = token_spans.get(j)
     if spans:
       base = cues[j].start
       cues[j].token_spans = [(c, round(a - base, 3), round(b - base, 3))
@@ -120,7 +119,7 @@ def _ctc_polish(cues, audio):
   if not cues or audio is None or not ctc_available():
     return 0
   try:
-    ctc_starts, ctc_ends, scores = align_lines([c.text for c in cues], audio)
+    ctc_starts, ctc_ends, scores, spans = align_lines([c.text for c in cues], audio)
   except Exception as e:
     print(f"  coarse-fa: ctc failed ({e})")
     return 0
@@ -136,7 +135,7 @@ def _ctc_polish(cues, audio):
     if j in gated and ctc_ends.get(j, 0.0) > s:
       e = min(e, ctc_ends[j])
     cue.start, cue.end = s, max(e, s + 0.2)
-  _attach_ctc_evidence(cues, adopted, scores)
+  _attach_ctc_evidence(cues, adopted, scores, spans)
   for j in ctc_starts:
     if 0 <= j < len(cues) and cues[j].score is None:
       cues[j].score = scores.get(j)
@@ -199,8 +198,7 @@ def _lrc_warp(lines, segments, audio, use_fa=True, runs_lo=None, **_):
   n = len(texts)
   runs_lo = runs_lo or []
 
-  from .anchors import collect
-  from .ctc_align import ctc_available, gate
+  from .ctc_align import align_lines, ctc_available, gate
   from .warp import apply_warp, fit_warp, span_ok, warped_durations
 
   if not ctc_available():
@@ -209,18 +207,20 @@ def _lrc_warp(lines, segments, audio, use_fa=True, runs_lo=None, **_):
   need = MIN_ANCHORS
 
   # one global monotonic CTC pass: anchors come back in order and on their
-  # own occurrence, so no candidate arbitration needed
+  # own occurrence, so no candidate arbitration needed. Handed over ungated:
+  # fit_warp's monotone/linear chain filters discard outliers themselves.
   try:
-    candidates, (ctc_starts, ctc_ends, scores) = collect(lrc_times, texts, audio)
+    ctc_starts, ctc_ends, scores, spans = align_lines(texts, audio)
   except Exception as e:
     print(f"  lrc-warp: ctc failed ({e})")
     return None
-  if not candidates:
+  anchors = sorted(ctc_starts.items())
+  if len(anchors) < 3:
     print("  lrc-warp: no CTC anchors")
     return None
 
   fitted = None
-  anchors, adiag = candidates[0]
+  adiag = {"aligner": "ctc", "stamps": len(anchors)}
   if len(anchors) >= need:
     res = fit_warp(anchors, lrc_times, runs_lo)
     # count anchors surviving monotone filtering + head guard, not raw stamps:
@@ -265,7 +265,7 @@ def _lrc_warp(lines, segments, audio, use_fa=True, runs_lo=None, **_):
   from .align import build_cues, split_outside
   cues = build_cues(starts, texts, runs_lo, ends_hint=ends_hint,
                     confidence=["lrc"] * n, durations=durations)
-  _attach_ctc_evidence(cues, adopted, scores)
+  _attach_ctc_evidence(cues, adopted, scores, spans)
 
   song_start, song_end = cues[0][0], cues[-1][1]
   pre, post = split_outside(segments, song_start, song_end)

@@ -79,12 +79,14 @@ def build_actions(win):
 
   save_act = QAction(theme.icon("save", theme.ICON_WRITE), "Save", win)
   save_act.setShortcut(QKeySequence("Ctrl+S"))
+  save_act.setEnabled(False)  # armed by unsaved edits, see _refresh_save_action
   save_act.setToolTip("Save session")
   save_act.triggered.connect(win._on_save)
+  win._save_act = save_act
 
   win._export_act = QAction(theme.icon("export", theme.ICON_WRITE), "Export SRT", win)
   win._export_act.setEnabled(False)
-  win._export_act.setToolTip("Save session + write SRT from the current cues")
+  win._export_act.setToolTip("Write SRT from the current cues")
   win._export_act.triggered.connect(win._on_export)
 
   win._export_ass_act = QAction(theme.icon("export_ass", theme.ICON_WRITE), "Export ASS", win)
@@ -262,12 +264,13 @@ def build_actions(win):
   mb = win.menuBar()
   file_menu = mb.addMenu("File")
   file_menu.addAction(open_act)
-  file_menu.addAction(win._transcribe_act)
   file_menu.addAction(save_act)
   file_menu.addAction(win._export_act)
   file_menu.addAction(win._export_ass_act)
   file_menu.addAction(win._export_lrc_act)
   file_menu.addAction(win._embed_act)
+  file_menu.addSeparator()
+  file_menu.addAction(win._transcribe_act)
   file_menu.addSeparator()
   file_menu.addAction(cleanup_act)
   file_menu.addAction(cache_act)
@@ -322,12 +325,15 @@ def build_actions(win):
   tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
   win.addToolBar(tb)
   win._view_menu.addAction(tb.toggleViewAction())
+  # workflow order: file | transcribe | undo/redo | align | cue edit.
+  # Cleanup is destructive, menu only.
   tb.addAction(open_act)
-  tb.addAction(win._transcribe_act)
   tb.addAction(save_act)
   tb.addAction(win._export_act)
   tb.addAction(win._export_ass_act)
   tb.addAction(win._embed_act)
+  tb.addSeparator()
+  tb.addAction(win._transcribe_act)
   tb.addSeparator()
   tb.addAction(undo_act)
   tb.addAction(redo_act)
@@ -340,8 +346,6 @@ def build_actions(win):
   tb.addAction(del_act)
   tb.addAction(split_act)
   tb.addAction(merge_act)
-  tb.addSeparator()
-  tb.addAction(cleanup_act)
 
   _annotate_shortcuts(win)
 

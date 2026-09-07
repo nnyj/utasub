@@ -74,7 +74,7 @@ CHAIN_TOL = 1.5      # per-anchor stamp jitter a pair's slope must tolerate
 CHAIN_MIN_FRAC = 0.5  # below this the anchors are not one line and are kept as-is
 CHAIN_SPLIT_FRAC = 0.8  # two chains covering this much of the set are a real seam
 
-def linear_anchors(anchors, lrc_times, lo=None, hi=None, tol=CHAIN_TOL):
+def linear_anchors(anchors, lrc_times, tol=CHAIN_TOL):
   """Longest chain whose every step implies a tempo a take could actually run.
 
   Stronger than monotone_anchors, which only requires audio time not go
@@ -93,8 +93,6 @@ def linear_anchors(anchors, lrc_times, lo=None, hi=None, tol=CHAIN_TOL):
   cover. Leftovers are re-chained; only when the two occupy separate stretches
   are anchors handed back whole for the fit to seam.
   """
-  lo = SLOPE_LO if lo is None else lo
-  hi = SLOPE_HI if hi is None else hi
   n = len(anchors)
   if n < 3:
     return list(anchors)
@@ -107,7 +105,8 @@ def linear_anchors(anchors, lrc_times, lo=None, hi=None, tol=CHAIN_TOL):
       for k in range(i):
         dx = lrc_times[anchors[idx[i]][0]] - lrc_times[anchors[idx[k]][0]]
         dy = anchors[idx[i]][1] - anchors[idx[k]][1]
-        if dx > 0 and lo * dx - tol <= dy <= hi * dx + tol and best[k] + 1 > best[i]:
+        if (dx > 0 and SLOPE_LO * dx - tol <= dy <= SLOPE_HI * dx + tol
+            and best[k] + 1 > best[i]):
           best[i], prev[i] = best[k] + 1, k
     e = max(range(len(idx)), key=lambda i: best[i])
     out = []
@@ -119,7 +118,8 @@ def linear_anchors(anchors, lrc_times, lo=None, hi=None, tol=CHAIN_TOL):
   keep = longest(list(range(n)))
   if len(keep) == n:
     return list(anchors)
-  rest = [i for i in range(n) if i not in set(keep)]
+  kept = set(keep)
+  rest = [i for i in range(n) if i not in kept]
   if len(rest) >= MIN_SEG:
     other = longest(rest)
     if len(keep) + len(other) >= CHAIN_SPLIT_FRAC * n and len(other) >= MIN_SEG:
@@ -192,7 +192,7 @@ def _segment_fit(anchors, lrc_times, gaps):
       best, bk = None, None
       seam = lrc_times[anchors[a][0]]
       for a2 in range(0, a - MIN_SEG + 1):
-        if (a2, a) not in D or (a2, a) not in cost:
+        if (a2, a) not in D:
           continue
         _, sl2, off2, ms2 = cost[(a2, a)]
         # the jump is the discontinuity at the seam, not an offset difference:

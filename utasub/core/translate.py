@@ -3,6 +3,7 @@ Provider-neutral: one POST per batch of lines, numbered in and out so a cue keep
 its slot even when a line comes back empty. No third-party SDK, urllib only."""
 import json
 import re
+import urllib.error
 import urllib.request
 
 ENDPOINT_DEFAULT = "http://localhost:8080/v1"
@@ -63,5 +64,6 @@ def endpoint_alive(endpoint):
   try:
     with urllib.request.urlopen(f"{endpoint.rstrip('/')}/models", timeout=2) as r:
       return r.status == 200
-  except Exception:
+  except (OSError, urllib.error.URLError, ValueError) as e:
+    print(f"  translate endpoint down: {endpoint}: {e}")
     return False

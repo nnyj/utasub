@@ -130,7 +130,8 @@ def apply_theme(app):
 
   css = {k: v.name() for k, v in (("hi", SURFACE_HI), ("bd", BORDER),
                                   ("gr", GROOVE), ("hd", HANDLE),
-                                  ("ac", ACCENT), ("bg", BASE))}
+                                  ("ac", ACCENT), ("bg", BASE), ("fg", TEXT),
+                                  ("dis", DISABLED))}
   app.setStyleSheet(
     "QToolBar {{ border: 0; padding: 4px; spacing: 4px; }}"
     "QToolButton {{ padding: 4px; border-radius: 4px; }}"
@@ -151,6 +152,21 @@ def apply_theme(app):
     " border-radius: 4px; padding: 2px 4px; }}"
     "QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus {{"
     " border: 1px solid {ac}; }}"
+    # Fusion draws spinbox arrows too faint on dark; CSS border triangles instead.
+    # Side borders must be opaque (Qt skips transparent edges, no bevel), so
+    # they take the field background colour.
+    "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{"
+    " subcontrol-origin: border; width: 14px; border: 0; background: none; }}"
+    "QDoubleSpinBox::up-button {{ subcontrol-position: top right; }}"
+    "QDoubleSpinBox::down-button {{ subcontrol-position: bottom right; }}"
+    "QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow {{ width: 0; height: 0;"
+    " border-left: 4px solid {bg}; border-right: 4px solid {bg}; }}"
+    "QDoubleSpinBox::up-arrow {{ border-bottom: 5px solid {fg}; }}"
+    "QDoubleSpinBox::down-arrow {{ border-top: 5px solid {fg}; }}"
+    "QDoubleSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:off {{"
+    " border-bottom-color: {dis}; }}"
+    "QDoubleSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:off {{"
+    " border-top-color: {dis}; }}"
     # scrollbars need a contrasting groove, else they read as empty space
     "QScrollBar:horizontal {{ background: {gr}; border: 1px solid {bd};"
     " border-radius: 5px; height: 12px; margin: 0 12px; }}"

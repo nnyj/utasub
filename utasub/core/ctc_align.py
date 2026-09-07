@@ -26,12 +26,6 @@ GATE_PCT = 10  # drop this % of lines by mean token log-prob before direct use
 _model_cache = []
 _available = None
 
-# Per-line token spans [(char, start, end)] from the most recent align_lines
-# call, for karaoke \kf runs. Kept here rather than returned, so the 3-tuple
-# signature anchors.collect unpacks stays as it is; the pipeline runs one pass
-# per region on one thread, and place.py reads it straight after collect().
-last_token_spans = {}
-
 # ━━━━━━ model and emission ━━━━━━
 
 def ctc_available():
@@ -97,20 +91,17 @@ def _line_tokens(texts, dictionary):
 
 # ━━━━━━ align ━━━━━━
 
-def align_lines(texts, audio, sr=SR):
-  """Stamp every line against audio in one global pass.
-  Returns (starts, ends, scores) keyed by line index, scores = mean token
-  log-prob. Empty dicts when the pass cannot run.
-  Also refreshes module-level `last_token_spans` with per-line
-  [(romaji char, start, end)] for karaoke fills."""
-  global last_token_spans
-  last_token_spans = {}
+def align_lines(texts, audio):
+  """Stamp every line against 16k audio in one global pass.
+  Returns (starts, ends, scores, token_spans) keyed by line index, scores =
+  mean token log-prob, token_spans = [(romaji char, start, end)] for karaoke
+  fills. Empty dicts when the pass cannot run."""
   model, dictionary, torch, dev = load_model()
   import torchaudio.functional as AF
   star = dictionary["<star>"]
   lines = _line_tokens(texts, dictionary)
-  if not lines or len(audio) < sr // 2:
-    return {}, {}, {}
+  if not lines or len(audio) < SR // 2:
+    return {}, {}, {}, {}
   em, sec_per_frame = _emission(model, audio, torch, dev)
   seq, slices = [star], []
   for j, ids, chars in lines:
@@ -118,23 +109,27 @@ def align_lines(texts, audio, sr=SR):
     seq += ids + [star]
   if len(seq) > em.shape[1]:  # more tokens than frames: nothing alignable
     print(f"  ctc: {len(seq)} tokens over {em.shape[1]} frames, skipped")
-    return {}, {}, {}
+    return {}, {}, {}, {}
   targets = torch.tensor([seq], dtype=torch.int32, device=dev)
   aligned, path_scores = AF.forced_align(em, targets, blank=0)
   spans = AF.merge_tokens(aligned[0], path_scores[0])
   if len(spans) != len(seq):
     print(f"  ctc: {len(spans)} spans for {len(seq)} tokens, skipped")
-    return {}, {}, {}
-  starts, ends, scores = {}, {}, {}
+    return {}, {}, {}, {}
+  starts, ends, scores, token_spans = {}, {}, {}, {}
   for j, a, b, chars in slices:
     starts[j] = spans[a].start * sec_per_frame
     ends[j] = spans[b - 1].end * sec_per_frame
     scores[j] = statistics.mean(s.score for s in spans[a:b])
-    last_token_spans[j] = [(c, s.start * sec_per_frame, s.end * sec_per_frame)
-                           for c, s in zip(chars, spans[a:b])]
-  return starts, ends, scores
+    token_spans[j] = [(c, s.start * sec_per_frame, s.end * sec_per_frame)
+                      for c, s in zip(chars, spans[a:b])]
+  return starts, ends, scores, token_spans
 
 # ━━━━━━ confidence gate ━━━━━━
+
+def _pct_cut(vals, pct):
+  """Value at the bottom pct% of sorted vals."""
+  return vals[min(len(vals) - 1, int(pct / 100.0 * len(vals)))]
 
 def low_conf_cut(scores, pct=GATE_PCT):
   """Score below which a cue is worth a second look, in mean-token-log-prob:
@@ -145,7 +140,7 @@ def low_conf_cut(scores, pct=GATE_PCT):
   vals = sorted(s for s in scores if s is not None)
   if len(vals) < 5:
     return None
-  return vals[min(len(vals) - 1, int(pct / 100.0 * len(vals)))]
+  return _pct_cut(vals, pct)
 
 def gate(stamps, scores, pct=GATE_PCT):
   """Drop the lowest pct% of lines by confidence. One per-song percentile,
@@ -156,5 +151,5 @@ def gate(stamps, scores, pct=GATE_PCT):
   vals = sorted(scores[j] for j in stamps if j in scores)
   if not vals:
     return dict(stamps)
-  cut = vals[min(len(vals) - 1, int(pct / 100.0 * len(vals)))]
+  cut = _pct_cut(vals, pct)
   return {j: t for j, t in stamps.items() if scores.get(j, cut) >= cut}

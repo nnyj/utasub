@@ -179,6 +179,25 @@ def test_cue_extras_do_not_widen_the_serialized_cue(tmp_path):
   assert raw["cues"] == [[1.0, 3.0, "hello", "lrc"]]
   assert raw["cue_meta"] == [{"score": 0.5}]
 
+def test_cue_without_confidence_round_trips_as_cue_with_extras(tmp_path):
+  """confidence None still writes 4 slots, so load rebuilds a Cue and its
+  score/token_spans instead of a bare 3-tuple."""
+  import json
+  from utasub.core.align import Cue
+  media = _media(tmp_path)
+  cue = Cue(1.0, 3.0, "hello", None, score=0.7, token_spans=[[1.0, 1.5]])
+  session.save(media, cues=[cue])
+  got = session.load(media)["cues"][0]
+  assert isinstance(got, Cue)
+  assert got.confidence is None
+  assert (got.score, got.token_spans) == (0.7, [[1.0, 1.5]])
+  # old 3-list rows still load as plain tuples
+  path = session.session_path(media)
+  raw = json.loads(path.read_text(encoding="utf-8"))
+  raw["cues"] = [[1.0, 3.0, "hello"]]
+  path.write_text(json.dumps(raw), encoding="utf-8")
+  assert session.load(media)["cues"] == [(1.0, 3.0, "hello")]
+
 # --- gap 12: media stored as a basename ---
 
 def test_media_is_stored_as_a_basename(tmp_path):
