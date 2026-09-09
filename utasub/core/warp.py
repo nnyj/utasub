@@ -50,26 +50,6 @@ def voiced_near(runs, t, pre=ONSET_PRE):
 
 # --- anchor filtering ---
 
-def monotone_anchors(anchors):
-  """Longest non-decreasing chain in audio time over ascending line index.
-  Drops wrong-occurrence stamps on repeated lyrics and collapsed FA output."""
-  n = len(anchors)
-  if n < 2:
-    return list(anchors)
-  best = [1] * n
-  prev = [-1] * n
-  for i in range(n):
-    for k in range(i):
-      if anchors[k][1] <= anchors[i][1] and best[k] + 1 > best[i]:
-        best[i], prev[i] = best[k] + 1, k
-  e = max(range(n), key=lambda i: best[i])
-  chain = []
-  while e != -1:
-    chain.append(anchors[e])
-    e = prev[e]
-  chain.reverse()
-  return chain
-
 CHAIN_TOL = 1.5      # per-anchor stamp jitter a pair's slope must tolerate
 CHAIN_MIN_FRAC = 0.5  # below this the anchors are not one line and are kept as-is
 CHAIN_SPLIT_FRAC = 0.8  # two chains covering this much of the set are a real seam
@@ -77,8 +57,7 @@ CHAIN_SPLIT_FRAC = 0.8  # two chains covering this much of the set are a real se
 def linear_anchors(anchors, lrc_times, tol=CHAIN_TOL):
   """Longest chain whose every step implies a tempo a take could actually run.
 
-  Stronger than monotone_anchors, which only requires audio time not go
-  backwards: a wrong-occurrence stamp satisfies that easily, landing in order
+  A wrong-occurrence stamp can remain monotonic, landing in order
   but seconds early, and a run of them drags the fitted slope. A stamp jumped
   to another repeat implies a tempo on both sides no singer could hold; this
   catches that.
@@ -195,6 +174,9 @@ def _segment_fit(anchors, lrc_times, gaps):
         if (a2, a) not in D:
           continue
         _, sl2, off2, ms2 = cost[(a2, a)]
+        previous = lrc_times[anchors[a][0] - 1]
+        if _at((sl, off), seam) < _at((sl2, off2), previous):
+          continue
         # the jump is the discontinuity at the seam, not an offset difference:
         # with free slopes the offsets are not comparable on their own
         jump = _at((sl, off), seam) - _at((sl2, off2), seam)
@@ -206,9 +188,6 @@ def _segment_fit(anchors, lrc_times, gaps):
           pen = LAM_SLOPE
         else:
           if abs(jump) < MIN_JUMP:
-            continue
-          # a cut may not swallow more than the LRC interval it lands on
-          if jump < 0 and -jump >= seam - lrc_times[anchors[a - 1][0]]:
             continue
           if not _jump_credible(gaps, _at((sl2, off2), lrc_times[anchors[a - 1][0]]),
                                 _at((sl, off), seam), jump):
@@ -241,13 +220,13 @@ def _jump_credible(gaps, t_prev, t_next, jump):
              for g0, g1 in gaps)
 
 def fit_warp(anchors, lrc_times, runs):
-  """Fit the warp to [(line_idx, audio_time)] anchors.
+  """Fit the warp to global CTC [(line_idx, audio_time)] anchors in audio order.
   Returns (segments, diag) with segments = [(first_line_idx, slope, offset)]
   ascending, or None when there are too few anchors to fit anything.
   Each segment carries its own slope, so a take running a whole section slower
   than the studio cut is expressible without changepoints."""
   raw = len(anchors)
-  anchors = linear_anchors(monotone_anchors(sorted(anchors)), lrc_times)
+  anchors = linear_anchors(sorted(anchors), lrc_times)
   if len(anchors) < 3:
     return None
   gaps = silence_gaps(runs)
@@ -277,7 +256,7 @@ def fit_warp(anchors, lrc_times, runs):
   for k in range(1, len(out)):
     seam = lrc_times[out[k][0]]
     jumps.append(round(_at(out[k][1:], seam) - _at(out[k - 1][1:], seam), 2))
-  # counted against the stamps handed in, so chain/monotone drops show too
+  # counted against the stamps handed in, so chain drops show too
   diag = {"anchors": len(kept), "dropped": raw - len(kept),
           "segments": len(out), "resid": round(resid, 3),
           "slopes": [round(sl, 4) for _, sl, _ in out],

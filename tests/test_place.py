@@ -297,13 +297,13 @@ def test_rescue_from_silence_moves_forward_only():
 def test_linear_anchors_drops_wrong_occurrence_stamps():
   """A stamp matched to an earlier repeat lands in order; only the impossible
   tempo it implies on both sides separates it."""
-  from utasub.core.warp import linear_anchors, monotone_anchors
+  from utasub.core.warp import linear_anchors
   lrc = [i * 5.0 for i in range(20)]
   anchors = [(j, 20.0 + 1.05 * lrc[j]) for j in range(20)]
   # lines 7 and 13 landed 4s early on a repeat, still in ascending audio order
   anchors[7] = (7, anchors[7][1] - 4.0)
   anchors[13] = (13, anchors[13][1] - 4.0)
-  assert len(monotone_anchors(sorted(anchors))) == 20, "monotone keeps them"
+  assert all(a[1] <= b[1] for a, b in zip(anchors, anchors[1:]))
   kept = {j for j, _ in linear_anchors(sorted(anchors), lrc)}
   assert 7 not in kept and 13 not in kept, f"kept a wrong-occurrence stamp: {kept}"
   assert len(kept) == 18, f"dropped a good anchor too: {sorted(kept)}"
@@ -317,6 +317,45 @@ def test_linear_anchors_keeps_a_take_that_inserted_material():
   anchors = [(j, 20.0 + lrc[j] + (0.0 if j < 10 else 30.0)) for j in range(20)]
   kept = linear_anchors(anchors, lrc)
   assert len(kept) == 20, f"discarded a real gap insertion, kept {len(kept)}"
+
+@pytest.mark.parametrize("extra_line", [None, 299.0])
+def test_cut_preserves_order_between_unanchored_lines(extra_line):
+  from utasub.core.warp import _segment_fit, apply_warp
+  times = [float(t) for t in range(0, 210, 10)] + [float(t) for t in range(300, 600, 10)]
+  if extra_line is not None:
+    times = sorted(times + [extra_line])
+  anchors = [(j, t if t <= 200 else t - 30) for j, t in enumerate(times)
+             if t <= 200 or t >= 300]
+  fitted = _segment_fit(anchors, times, [(200.0, 270.0)])
+  segments = [(anchors[a][0], slope, offset) for a, _, slope, offset in fitted]
+  starts = apply_warp(times, segments)
+  assert all(a <= b for a, b in zip(starts, starts[1:]))
+  if extra_line is None:
+    assert len(segments) == 2
+    assert starts[-1] == pytest.approx(times[-1] - 30)
+
+def test_partial_timestamps_use_coarse_placement(monkeypatch):
+  from utasub.core.place import AlignOpts, run_chain
+  from utasub.core.align import Cue
+  lines = _make_lines(12)
+  segments = _make_segments(lines)
+  truth = [t + _fa_offset for t, _ in lines]
+  _patch_ctc(monkeypatch, truth)
+  _patch_fa(monkeypatch, _fa_truth(truth))
+  lines[3] = (None, lines[3][1])
+  cues, span, meta = run_chain(lines, segments, _fake_audio(), AlignOpts())
+  assert meta["strategy"] == "coarse_fa"
+  assert span is not None
+  assert len([c for c in cues if isinstance(c, Cue)]) == len(lines)
+
+def test_ctc_polish_keeps_short_cues_nonoverlapping(monkeypatch):
+  from utasub.core.align import Cue
+  from utasub.core.place import _ctc_polish
+  _patch_ctc(monkeypatch, [1.0, 1.05])
+  cues = [Cue(1.0, 2.0, "first"), Cue(1.05, 2.0, "second")]
+  _ctc_polish(cues, _fake_audio())
+  assert cues[0].start < cues[0].end <= cues[1].start
+  assert cues[1].start < cues[1].end
 
 # --- gap 5 / gap 3: per-cue CTC evidence ---
 

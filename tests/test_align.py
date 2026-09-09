@@ -1,6 +1,7 @@
 """Unit tests for coarse alignment + candidate scoring.
 Fixture: synthetic timed lines, replayed as ASR segments with jitter and misheard noise."""
 import random
+import pytest
 
 _LYRICS = [
   "morning light on the empty street",
@@ -130,6 +131,13 @@ def test_candidate_scoring_prefers_correct_lyrics():
   assert good_score > 0.4, f"good score too low: {good_score}"
 
 # --- anchor-based warp ---
+
+@pytest.mark.parametrize("durations", [None, [1.0, 1.0]])
+def test_close_starts_keep_cues_nonoverlapping(durations):
+  from utasub.core.align import build_cues
+  cues = build_cues([1.0, 1.05], ["first", "second"], [], durations=durations)
+  assert cues[0].start < cues[0].end <= cues[1].start
+  assert cues[1].start < cues[1].end
 
 def test_envelope_trim_floored_when_voice_lost_mid_phrase():
   """Trim far below word need means voice lost mid-phrase; LRC interval takes over."""

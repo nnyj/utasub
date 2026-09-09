@@ -21,7 +21,7 @@ def _stub(captured, score=-0.1, spans=(("a", 0.5, 0.7),)):
   return _a
 
 def test_window_is_the_cue_bounds():
-  cue = Cue(10.0, 12.0, "till i die")
+  cue = Cue(10.0, 12.0, "sample lyric")
   cap = {}
   res = syllabize_cue(cue, _audio(30.0), SR, aligner=_stub(cap))
   assert cap["len"] == int(12.0 * SR) - int(10.0 * SR)  # exactly [start, end]

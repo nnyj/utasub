@@ -297,7 +297,7 @@ def build_cues(starts, texts, runs, ends_hint=None, confidence=None,
     if durations is None:
       e = max((ends_hint or {}).get(j, 0.0), walk_end(s, e0, runs))
       e = min(e0, e) if e > s else min(e0, s + 8.0)
-      out.append(Cue(s, max(e, s + 0.2), texts[j], conf))
+      out.append(Cue(s, min(e0, max(e, s + 0.2)), texts[j], conf))
       continue
     d = durations[j]
     e_lrc = s + d

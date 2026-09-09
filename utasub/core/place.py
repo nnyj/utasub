@@ -19,15 +19,14 @@ SNAP_FLOOR = 0.02    # onset strength floor, relative to peak RMS
 SILENCE_REACH = 2.0  # how far a line stranded in silence may be carried forward
 # How far a CTC stamp may sit from the placement warp+snap already agreed on.
 # Warp is fitted from these same stamps, so a stamp this far disagrees with
-# every other stamp in the song. 2.25..3.0 score identically over 5 sessions /
-# 766 gold lines, 2.5 is the mid-plateau point, furthest from either edge.
+# every other stamp in the song.
 ADOPT_MAX = 2.5
 
 # --- helpers ---
 
 def _lrc_has_timestamps(lines):
-  """True when LRC has line timestamps (not all None)."""
-  return any(t is not None for t, _ in lines)
+  """Warp needs a timestamp for every lyric line."""
+  return bool(lines) and all(t is not None for t, _ in lines)
 
 def _onset_strength(audio, sr=16000, frame_s=0.01, win=1024):
   """Per-frame spectral flux: summed positive change in magnitude spectrum.
@@ -73,12 +72,11 @@ def monotonic(starts, min_gap=0.05):
 def _adopt_fa(starts, fa_stamps, bound=ADOPT_MAX, adopted=None):
   """Take the global CTC stamp wherever it agrees with the warp.
 
-  One filter, the bound: a monotonic path can't match the wrong repeat of a
-  chorus, but can still smear a line across an instrumental, landing seconds
+  One filter, the bound: a monotonic path can still smear a line
+  across an instrumental or repeated phrase, landing seconds
   from the warp every other stamp in the song agrees on. The confidence gate
   is deliberately not applied here, it drops correct low-score stamps (quiet
-  or breathy entries) that the bound already vets; measured on 766 gold lines
-  it costs 14 lines over 0.3s and 3 over 2s. Kept stamps are believed
+  or breathy entries) that the bound already vets. Kept stamps are believed
   outright: the stamp measures this line's own attack, the snap guesses at it.
   adopted: optional set, filled with the line indices the bound kept.
   """
@@ -134,7 +132,10 @@ def _ctc_polish(cues, audio):
     e = min(cue.end, starts[j + 1] if j + 1 < len(starts) else cue.end)
     if j in gated and ctc_ends.get(j, 0.0) > s:
       e = min(e, ctc_ends[j])
-    cue.start, cue.end = s, max(e, s + 0.2)
+    cue.start = s
+    cue.end = max(e, s + 0.2)
+    if j + 1 < len(starts):
+      cue.end = min(cue.end, starts[j + 1])
   _attach_ctc_evidence(cues, adopted, scores, spans)
   for j in ctc_starts:
     if 0 <= j < len(cues) and cues[j].score is None:
@@ -206,8 +207,7 @@ def _lrc_warp(lines, segments, audio, use_fa=True, runs_lo=None, **_):
     return None
   need = MIN_ANCHORS
 
-  # one global monotonic CTC pass: anchors come back in order and on their
-  # own occurrence, so no candidate arbitration needed. Handed over ungated:
+  # One global CTC pass returns ordered anchors. Handed over ungated:
   # fit_warp's monotone/linear chain filters discard outliers themselves.
   try:
     ctc_starts, ctc_ends, scores, spans = align_lines(texts, audio)
@@ -223,7 +223,7 @@ def _lrc_warp(lines, segments, audio, use_fa=True, runs_lo=None, **_):
   adiag = {"aligner": "ctc", "stamps": len(anchors)}
   if len(anchors) >= need:
     res = fit_warp(anchors, lrc_times, runs_lo)
-    # count anchors surviving monotone filtering + head guard, not raw stamps:
+    # count anchors surviving chain filtering + head guard, not raw stamps:
     # a free slope fitted on a handful of survivors swings the whole song
     if res is not None and res[1]["anchors"] >= need:
       res[1].update(adiag)

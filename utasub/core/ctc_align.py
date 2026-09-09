@@ -2,18 +2,15 @@
 
 One Viterbi path over the whole audio span, seedless and unwindowed: every
 line's tokens in order, with a `<star>` wildcard at head, tail, and between
-lines so intros, solos, MC talk have a label to sit on and no lyric token
-gets dragged onto them. Lines are therefore in order and on the right
-occurrence of a repeated chorus by construction.
+lines so intros, solos, MC talk have a label to sit on. Stamps remain in
+order, but misplaced stamps still need warp filtering.
 
-Confidence is mean token log-prob of a line's own tokens; separates outliers
-cleanly, so stamps consumed directly (place._adopt_fa) are gated at the
-per-song GATE_PCT percentile. Warp fit gets the ungated set, since its own
-chain filters already discard outliers.
+Confidence is mean token log-prob of a line's own tokens. Line ends use the
+per-song GATE_PCT percentile; start adoption uses a timing bound. Warp fit
+gets the ungated set, since its own chain filters discard outliers.
 
 Absence of torchaudio degrades with a message, never crashes.
 """
-import math
 import statistics
 
 SR = 16000
@@ -21,7 +18,7 @@ SR = 16000
 # EMIT_CTX of receptive-field context trimmed off each seam; the alignment path
 # stays one forced_align over the concatenated emission
 EMIT_CHUNK, EMIT_CTX = 30.0, 1.5
-GATE_PCT = 10  # drop this % of lines by mean token log-prob before direct use
+GATE_PCT = 10  # drop this % of line ends by mean token log-prob
 
 _model_cache = []
 _available = None

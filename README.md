@@ -1,6 +1,6 @@
 # utasub
 
-<div align="center">
+<div align='center'>
 
 [![Stars](https://img.shields.io/github/stars/nnyj/utasub?style=for-the-badge&labelColor=555&color=e3b341)](https://github.com/nnyj/utasub/stargazers)
 [![Build](https://img.shields.io/github/actions/workflow/status/nnyj/utasub/release.yml?style=for-the-badge&labelColor=555)](https://github.com/nnyj/utasub/actions)
@@ -83,81 +83,56 @@ utasub lives/ --recursive         # every media file under a tree, summary table
 
 - `utasub-asr` flags: `--lang` (force language), `--small` (0.6B model), `--cpu`, `--no-stems` (transcribe full mix), `--overwrite`
 
-## How it works
+## Alignment
 
-```mermaid
-flowchart TD
-  A[video/audio file] --> B[ASR: vocal stem + Qwen3-ASR transcript, cached in session JSON]
-  B --> C[region detection from vocal gaps, multi-song only]
-  C --> D[lyric fetch: NetEase / LRCLib / tags / local library]
-  D --> E[candidate scoring vs transcript in romaji space]
-  E --> F{placement chain}
-  F -->|1| G[lrc_warp: global CTC anchors + piecewise tempo map of LRC timestamps]
-  F -->|2, fallback| H[coarse_fa: romaji char map + Qwen FA stamps, envelope-only if sparse]
-  G --> I[polish: onset snap, silence rescue, gated CTC stamp adoption]
-  H --> I
-  I --> J[timeline GUI, manual fixes]
-  J --> K[export: srt / ass / mux]
-```
+- Inputs:
+  - Qwen3-ASR transcribes the vocal stem, cached in `<name>.utasub.json`.
+  - Lyrics come from NetEase, LRCLib, embedded tags, or the local library.
+  - Candidates are scored against romanized ASR text after credit removal.
+  - Multi-song mode detects vocal regions and matches setlist order with dynamic programming.
 
-- ASR: Qwen3-ASR runs on a Mel-Band Roformer vocal stem and the transcript is cached inside `<name>.utasub.json`, `utasub` transcribes on demand and `utasub-asr` does the same as a batch pre-pass
-- Candidate scoring: fetched lyric candidates are scored against the transcript in romaji space, credits stripped
-- Placement runs per song as a strategy chain, first success wins: `lrc_warp` then `coarse_fa`
-- Two aligners: a global CTC pass (torchaudio MMS_FA) pins the warp for `lrc_warp` and scores, stamps and end-trims both strategies' cues, Qwen3-ForcedAligner gives the per-line stamps `coarse_fa` places from
-- Without an aligner (`--no-fa`, no `torchaudio`, no GPU): `lrc_warp` cannot fit (no anchors), `coarse_fa` degrades to envelope-only
-- Multi-song: detected regions are matched to the setlist by monotonic DP
-- All state (candidates, cues, CTC scores and token spans, manual edits, offsets) lives in the session JSON, so export is deterministic and repeatable
-- The session stores the media basename, so moving the pair to another folder keeps it valid; manual edits are kept as `timings`, `texts`, `deleted` and `added` records, so a re-align keeps hand work
-- Karaoke: the adopted stamp's per-token spans are stored relative to the cue start and rendered as `\kf` runs on the sung line of the `.ass`, unmatched romaji rides the run before it
+- LRC warp:
+  - Global CTC alignment uses torchaudio MMS_FA to stamp ordered lyric tokens across each song.
+  - `<star>` tokens absorb intros, instrumentals, and speech between lyric lines.
+  - Emissions use 30 s chunks with 1.5 s context, concatenated for one alignment pass.
+  - Ordered stamps can still be misplaced, the linear anchor filter rejects implausible timing.
+  - A piecewise linear map fits LRC timestamps to audio, allowing tempo changes and offsets.
+  - Dynamic programming penalizes extra segments, discontinuous jumps require silence and cannot reverse adjacent lyric starts.
 
-## Glossary
+- Coarse fallback:
+  - Partial or absent LRC timestamps, or a rejected warp, use romanized character matching against ASR.
+  - ASR character times are interpolated within segment bounds, unmatched lyric stretches interpolate between matches.
+  - Qwen3-ForcedAligner refines starts in padded audio windows, subject to rate and drift checks.
+  - Fewer than half the lines stamped by Qwen uses envelope placement instead.
+  - Global CTC then polishes coarse cues with the same adoption bound and end gate.
+  - `--no-fa` or unavailable aligners use envelope placement, supported aligners can run on CPU.
 
-- LRC: lyric file format with per-line timestamps (`[mm:ss.xx] line`), here always the studio recording's timings
-- ASR: automatic speech recognition, audio in, text with rough segment times out
-- FA, forced alignment: the inverse of ASR, the lyric text is already known, the model listens to the audio and measures when each token of it is sung
-- FA stamp: aligner output aggregated per lyric line, one measured (start, end) pair plus a confidence
-- Coarse map: rough per-line start from text matching alone, no model, used for candidate and region scoring
-- Anchor: a (lyric line, audio time) pair the warp is fitted through, here every line the global CTC pass stamped
-- CTC, connectionist temporal classification: the decoding scheme forced alignment rests on, the acoustic model scores every token's probability per audio frame, and the best monotonic path through that grid that spells the known text gives each token its time span
-- Global CTC pass: one such path over a whole song's audio at once, every line lands in order and on the right repeat of a chorus
-- Star token: a wildcard label in the target sequence that any frame may match, placed between lines so instrumental breaks and MC talk do not drag a lyric token onto them
-- Confidence gate: drop the lowest-scoring tenth of lines by mean token log-prob, applied to the CTC line ends and to the `coarse_fa` stamps, not to start adoption
-- Vocal stem: the separated vocals-only audio track (accompaniment removed)
-- Envelope: loudness-over-time curve computed from the vocal stem, tells voiced from silent spans, used for placement checks and end trimming
-- Onset: sudden spectral-flux energy rise, a likely syllable/note start, snap target for line starts
-- DP, dynamic programming: exhaustive-but-cheap optimization over ordered choices, used twice, changepoint search for warp segment boundaries, and monotonic region-to-setlist matching
-- Warp: the fitted map from LRC time to live-audio time, piecewise linear, each piece is a tempo ratio plus offset
+- Cue timing:
+  - Warp starts snap to spectral-flux onsets within 0.5 s, silence rescue reaches 2.0 s forward.
+  - CTC starts within 2.5 s of placement are adopted without a confidence gate.
+  - CTC end hints exclude the lowest-scoring tenth of lines by mean token log-probability.
+  - Warp cue ends use tempo-scaled LRC intervals, envelope trimming, and character-rate bounds.
+  - The Conf column flags the bottom tenth of song scores, fewer than 5 scores have no cutoff.
 
-## Alignment algorithms
+- Session and export:
+  - Session JSON stores candidates, cues, CTC evidence, offsets, and manual edits for repeatable export.
+  - The media basename lets the session and media move together.
+  - Re-alignment preserves manual timing, text, deletion, and addition records.
+  - Adopted CTC token spans are relative to cue start and drive ASS `\kf` karaoke fills.
+  - Unmatched romaji uses the preceding karaoke run, unadopted stamps supply no token spans.
 
-- LRC warp (`core/warp.py`, `core/place.py`):
-  - Treats the studio LRC timestamps as a correct shape, models the live take as that shape shifted and stretched
-  - Fits a monotone piecewise-linear map from LRC time to audio time, each piece has a tempo slope and offset
-  - Piece boundaries are chosen by a changepoint dynamic program, a fixed penalty per break means it only splits when the split buys real accuracy
-  - Discontinuous jumps (inserted/cut material) are only allowed where the audio is actually silent
-- Anchors (`core/anchors.py`, `core/ctc_align.py`):
-  - One global monotonic CTC pass stamps every line: torchaudio's MMS_FA acoustic model over the whole region span, targets are all lines' romaji tokens in order with a `<star>` wildcard between them (and at head/tail) to absorb intros, solos and MC talk
-  - The single Viterbi path puts every line in order by construction, so a repeated chorus cannot be matched to the wrong occurrence
-  - Confidence per line is its mean token log-prob. Anchors go to the warp fit ungated (the fit's own chain filters discard outliers); the CTC line ends are gated at the per-song 10th percentile
-  - The same score drives the GUI Conf column, amber under `low_conf_cut`: the bottom 10% of a song whose median stamp exceeds 0.5 probability, otherwise the absolute 0.2 floor, so a bad align flags every line rather than a tenth of them
-  - Emission is computed in 30s chunks with 1.5s of context per seam (self-attention is quadratic in frames), the alignment stays one pass over the concatenated emission
-- Forced alignment (`core/fa.py`):
-  - Qwen3-ForcedAligner gets known lyric text plus a padded audio window, returns per-token times mapped back to lines
-  - Stamps discarded if the implied singing rate is implausible or the stamp drifts too far from its seed
-  - Only the `coarse_fa` fallback uses it; the warp's anchors come from the CTC pass
-- Coarse map (`core/align.py`):
-  - A rough start time per lyric line derived from text matching alone, no FA model involved
-  - ASR only times whole segments, so each character inside a segment gets an invented time by linear interpolation between segment start and end
-  - Lyrics and transcript are romanized to character streams, `SequenceMatcher` finds matching runs, a lyric line starts at the interpolated time of its first matched character
-  - `coarse_fa` strategy (the fallback when no warp fits, so the path a plain-text lyric without timestamps takes): every line starts at its coarse-map time, then any line the FA model stamped (and that survived the gates) has its time replaced by the stamp
-  - If FA stamped under half the lines the stamps are distrusted entirely, placement uses coarse-map times nudged onto voiced spans of the envelope (envelope-only)
-  - Either way the global CTC pass then runs over the region: every line gets its score for the Conf column, a stamp within the same `ADOPT_MAX` 2.5s bound the warp path uses replaces the start and carries its token spans for the `\kf` fill, and the gated CTC line end trims the cue end
-- Placement polish (`core/place.py`):
-  - Final starts get local corrections: snap to nearest strong spectral-flux onset (`SNAP_WIN` 0.5s), forward rescue out of silence (`SILENCE_REACH` 2.0s), then adoption of the CTC stamps (the same pass that gave the anchors, no second alignment)
-  - Adoption has one filter, the `ADOPT_MAX` 2.5s bound from the warped-and-snapped placement: the warp is fitted from these same stamps, so a stamp further out disagrees with every other stamp in the song (a line smeared across an instrumental)
-  - No confidence gate on adoption, it drops correct low-score stamps on quiet or breathy entries that the bound already vets; over 766 gold lines gating costs 14 lines by more than 0.3s and 3 by more than 2s
-  - An adopted stamp also carries its per-token spans onto the cue, which is where the `.ass` karaoke fill comes from; a snapped line gets no spans, since they would time audio a snapped cue moved off
-  - Ends come from the LRC interval scaled by segment tempo, trimmed by envelope and the CTC line end, bounded by a chars-per-second rate guard
+## Terms
+
+| Term | Meaning |
+|---|---|
+| LRC | Lyrics with line timestamps |
+| ASR | Audio-to-text transcription with rough timing |
+| FA | Forced alignment of known text to audio |
+| CTC | Frame-level token alignment along an ordered path |
+| Anchor | Lyric-line index paired with an audio time |
+| Warp | Piecewise tempo-and-offset map from LRC time to audio time |
+| Envelope | Vocal loudness over time, used to detect voiced spans |
+| Onset | Spectral-energy rise used as a candidate vocal start |
 
 ## Tests
 
@@ -172,7 +147,8 @@ pip install -e .[asr]     # + qwen-asr, audio-separator (pulls torch)
 ```
 
 - Requires Python 3.12+, `ffmpeg`/`ffprobe` on PATH
-- [lyrickit](https://github.com/nnyj/lyrickit) and [romakit](https://github.com/nnyj/romakit) (credit cleanup, romanization) install automatically from GitHub; for development, a local `pip install -e path/to/lyrickit` afterwards overrides the git copy
+- [lyrickit](https://github.com/nnyj/lyrickit) and [romakit](https://github.com/nnyj/romakit) install automatically from GitHub for credit cleanup and romanization
+- For local development, `pip install -e path/to/lyrickit` overrides the GitHub copy
 - No local services or API keys needed, network use is limited to the lyric providers and the Wikipedia API
 - Optional paths: curated lyrics library dir (provider config), stem model dir (`UTASUB_STEM_MODEL_DIR`, defaults to library cache)
 
