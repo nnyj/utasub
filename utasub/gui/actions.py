@@ -1,8 +1,8 @@
 """QAction / menu / toolbar construction for MainWindow.
 Actions the window later enables or toggles are stored on it as attributes."""
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, QSize
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import QToolBar, QMessageBox
+from PySide6.QtWidgets import QToolBar, QMessageBox, QWidget, QVBoxLayout
 
 from . import theme
 from .util import settings
@@ -208,12 +208,14 @@ def build_actions(win):
   play_act.setShortcut(QKeySequence(Qt.Key_Space))
   play_act.triggered.connect(lambda: win._play_at())  # drop QAction's checked arg
 
-  play_cue_act = QAction("Play from selected cue", win)
+  play_cue_act = QAction("Play cue", win)
+  win._play_cue_act = play_cue_act
   play_cue_act.setShortcut(QKeySequence("Ctrl+Space"))
   play_cue_act.setToolTip("Seek a second before the selected cue and play")
   play_cue_act.triggered.connect(win._play_from_cue)
 
   tap_act = QAction("Tap sync", win)
+  win._tap_act = tap_act
   tap_act.setShortcut(QKeySequence(Qt.Key_T))
   tap_act.setToolTip("Stamp the selected cue's start at the playhead, then advance")
   tap_act.triggered.connect(timeline.tap_sync)
@@ -299,6 +301,7 @@ def build_actions(win):
   region_menu = align_menu.addMenu("Region")
   for act in region_acts:
     region_menu.addAction(act)
+  region_menu.addAction("Edit bounds...", lambda: win._edit_region_bounds(win._active_region))
   align_menu.addSeparator()
   align_menu.addAction(win._paste_setlist_act)
   align_menu.addAction(win._reset_edits_act)
@@ -320,32 +323,51 @@ def build_actions(win):
 
   build_lang_menu(win, mb)
 
-  # --- icon toolbar ---
-  tb = QToolBar("Actions")
-  tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
+  # --- session and cue toolbars ---
+  tb = QToolBar("Session", win)
+  tb.setMovable(False)
+  tb.setIconSize(QSize(16, 16))
+  tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
   win.addToolBar(tb)
   win._view_menu.addAction(tb.toggleViewAction())
-  # workflow order: file | transcribe | undo/redo | align | cue edit.
-  # Cleanup is destructive, menu only.
-  tb.addAction(open_act)
-  tb.addAction(save_act)
-  tb.addAction(win._export_act)
-  tb.addAction(win._export_ass_act)
-  tb.addAction(win._embed_act)
+  for act in (open_act, save_act):
+    tb.addAction(act)
   tb.addSeparator()
-  tb.addAction(win._transcribe_act)
+  for act in (win._align_region_act, win._align_all_act, win._lrc_as_is_act):
+    tb.addAction(act)
+  win._lrc_as_is_act.setIconText("LRC as-is")
   tb.addSeparator()
-  tb.addAction(undo_act)
-  tb.addAction(redo_act)
+  win._build_export_controls(tb)
   tb.addSeparator()
-  tb.addAction(win._align_region_act)
-  tb.addAction(win._align_all_act)
-  tb.addAction(win._lrc_as_is_act)
-  tb.addSeparator()
-  tb.addAction(add_act)
-  tb.addAction(del_act)
-  tb.addAction(split_act)
-  tb.addAction(merge_act)
+  for act, label in ((win._export_act, "SRT"), (win._export_ass_act, "ASS"),
+                     (win._embed_act, "Embed")):
+    tb.addAction(act)
+    act.setIconText(label)
+
+  cue_panel = QWidget()
+  cue_layout = QVBoxLayout(cue_panel)
+  cue_layout.setContentsMargins(0, 0, 0, 0)
+  cue_layout.setSpacing(0)
+  cue_tb = QToolBar("Cue tools", cue_panel)
+  cue_tb.setMovable(False)
+  cue_tb.setIconSize(QSize(16, 16))
+  cue_tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+  for act in (undo_act, redo_act):
+    cue_tb.addAction(act)
+    cue_tb.widgetForAction(act).setToolButtonStyle(Qt.ToolButtonIconOnly)
+  cue_tb.addSeparator()
+  for act in (add_act, split_act, merge_act, del_act):
+    cue_tb.addAction(act)
+  cue_tb.addSeparator()
+  cue_tb.addAction(win._recalc_act)
+  win._recalc_act.setIconText("Recalc")
+  cue_tb.addAction(next_susp_act)
+  next_susp_act.setIconText("Next weak")
+  cue_layout.addWidget(cue_tb)
+  cue_layout.addWidget(timeline.grid)
+  timeline._splitter.addWidget(cue_panel)
+  timeline._splitter.setStretchFactor(1, 1)
+  win._view_menu.addAction(cue_tb.toggleViewAction())
 
   _annotate_shortcuts(win)
 

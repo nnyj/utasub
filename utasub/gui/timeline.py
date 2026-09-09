@@ -5,7 +5,7 @@ from dataclasses import replace
 from PySide6.QtCore import Qt, QEvent
 from PySide6.QtWidgets import (
   QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollBar,
-  QSplitter, QPushButton, QToolButton, QDoubleSpinBox,
+  QSplitter, QPushButton, QToolButton, QDoubleSpinBox, QMessageBox,
 )
 
 from ..core.align import Cue
@@ -110,6 +110,16 @@ class TimelinePanel(QWidget):
     controls.addWidget(fit_btn)
     controls.addWidget(goto_btn)
     controls.addWidget(self.follow_btn)
+    help_btn = QToolButton()
+    help_btn.setText("?")
+    help_btn.setFixedSize(24, 20)
+    help_btn.setToolTip("Timeline controls")
+    help_btn.clicked.connect(lambda: QMessageBox.information(
+      self, "Timeline controls",
+      "Drag a cue to move; drag cue edges to resize.\n"
+      "Shift+drag: ripple following cues. Alt: disable snapping.\n"
+      "Shift+wheel: pan. Drag region flags in the ruler to edit bounds."))
+    controls.addWidget(help_btn)
     controls.addStretch(1)
 
     # cue offset: step box + -/+ shifting every cue. Edits stored timings,
@@ -248,7 +258,7 @@ class TimelinePanel(QWidget):
     self.grid.follow_playhead = checked
 
   def show_provisional_cues(self, cues):
-    """Display provisional (pre-export) cues dimmed; no dirty/undo, save() no-ops.
+    """Display provisional cues dimmed; saving preserves only region metadata.
     A later load_cues() clears the provisional flag and replaces display."""
     self._provisional = True
     self.canvas.provisional = True
@@ -626,7 +636,11 @@ class TimelinePanel(QWidget):
   def save(self, export=True):
     """Save manual edits + cues to session; re-export SRT when export=True.
     Returns True on success."""
-    synced = self._sync_session_cues()
+    if self._provisional and self._media_path and not export:
+      saved = sess_mod.load(self._media_path) or {}
+      synced = saved.get("cues", []), self._session.get("manual_edits", {})
+    else:
+      synced = self._sync_session_cues()
     if synced is None:
       return False
     cues, edits = synced

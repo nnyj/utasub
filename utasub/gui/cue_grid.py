@@ -41,12 +41,15 @@ class CueGrid(QTableWidget):
     # Text stays user-resizable; Romaji absorbs the leftover width
     self.horizontalHeader().setSectionResizeMode(self.COL_TEXT, QHeaderView.Interactive)
     self.horizontalHeader().setSectionResizeMode(self.COL_ROMAJI, QHeaderView.Stretch)
+    self.horizontalHeader().setSectionResizeMode(self.COL_NUM, QHeaderView.ResizeToContents)
+    self.horizontalHeader().setResizeContentsPrecision(-1)
     self.verticalHeader().setVisible(False)
-    self.setColumnWidth(self.COL_NUM, 40)
-    self.setColumnWidth(self.COL_START, 80)
-    self.setColumnWidth(self.COL_END, 80)
-    self.setColumnWidth(self.COL_CONF, 52)
-    self.setColumnWidth(self.COL_TEXT, 320)
+    self.verticalHeader().setMinimumSectionSize(24)
+    self.verticalHeader().setDefaultSectionSize(26)
+    self.setColumnWidth(self.COL_START, 70)
+    self.setColumnWidth(self.COL_END, 70)
+    self.setColumnWidth(self.COL_CONF, 48)
+    self.setColumnWidth(self.COL_TEXT, 247)
 
     self._cues = []  # reference to canvas.cues
     self._conf_cut = None  # per-song low-confidence percentile, set on rebuild

@@ -3,7 +3,7 @@ playback toolbar (play button, region bounds, SRT offset/lead).
 Space / T live as menu actions in actions.py."""
 from PySide6.QtCore import QUrl, Qt
 from PySide6.QtWidgets import (
-  QToolBar, QPushButton, QLineEdit, QLabel, QDoubleSpinBox, QCheckBox,
+  QToolBar, QPushButton, QLabel, QDoubleSpinBox, QCheckBox,
   QToolButton, QMenu, QSlider,
 )
 
@@ -32,10 +32,10 @@ class PlaybackMixin:
   """Playback toolbar + transport. Mixed into MainWindow, uses its state."""
 
   def _build_playback_toolbar(self):
-    """Second toolbar row, visible on both tabs."""
-    self.addToolBarBreak()
-    play_tb = QToolBar("Playback")
-    self.addToolBar(play_tb)
+    """Transport beside the waveform; shortcuts remain available on both tabs."""
+    play_tb = QToolBar("Playback", self)
+    play_tb.setMovable(False)
+    self._timeline._splitter.widget(0).layout().insertWidget(0, play_tb)
 
     self._play_region_btn = QPushButton()
     self._play_region_btn.setMaximumWidth(48)
@@ -54,24 +54,14 @@ class PlaybackMixin:
     play_tb.addWidget(self._volume_slider)
     play_tb.addSeparator()
 
-    play_tb.addWidget(QLabel("Region start:"))
-    self._region_start_edit = QLineEdit()
-    self._region_end_edit = QLineEdit()
-    for edit in (self._region_start_edit, self._region_end_edit):
-      edit.setMaximumWidth(80)
-      edit.setPlaceholderText("M:SS.ff")
-      edit.setToolTip("Bounds of the region selected in the Regions dock")
-    play_tb.addWidget(self._region_start_edit)
-    play_tb.addWidget(QLabel("end:"))
-    play_tb.addWidget(self._region_end_edit)
-
-    self._apply_bounds_btn = QPushButton("Apply bounds")
-    self._apply_bounds_btn.setMaximumWidth(110)
-    self._apply_bounds_btn.clicked.connect(self._on_apply_bounds)
-    play_tb.addWidget(self._apply_bounds_btn)
-    self.set_region_bounds(None)
-
+    self._playback_time = QLabel("0:00.00 / 0:00.00")
+    play_tb.addWidget(self._playback_time)
     play_tb.addSeparator()
+    play_tb.addAction(self._play_cue_act)
+    play_tb.addAction(self._tap_act)
+    self._view_menu.addAction(play_tb.toggleViewAction())
+
+  def _build_export_controls(self, play_tb):
     play_tb.addWidget(QLabel("SRT offset:"))
     self._offset_spin = self._export_spin(
       "export/offset", export_mod.SRT_OFFSET_S, (-5.0, 5.0),
@@ -113,7 +103,6 @@ class PlaybackMixin:
     self._translate_btn.setMenu(menu)
     play_tb.addWidget(self._translate_btn)
 
-    self._view_menu.addAction(play_tb.toggleViewAction())
 
   @staticmethod
   def _tr_menu_action(menu, label, key):
@@ -152,16 +141,6 @@ class PlaybackMixin:
     if getattr(self, "_audio_output", None) is not None:
       self._audio_output.setVolume(self._linear_volume(v))
 
-  def set_region_bounds(self, region):
-    """Show the active region's bounds, or blank + disabled with no region, so
-    Apply bounds is never armed with nothing to apply."""
-    from .timeline_util import fmt_time_mssff
-    for edit, val in ((self._region_start_edit, region and region.start),
-                      (self._region_end_edit, region and region.end)):
-      edit.setText("" if region is None else fmt_time_mssff(val))
-      edit.setEnabled(region is not None)
-    self._apply_bounds_btn.setEnabled(region is not None)
-
   # --- transport ---
 
   def _set_play_icon(self, playing):
@@ -199,7 +178,10 @@ class PlaybackMixin:
     self._set_play_icon(state == QMediaPlayer.PlayingState)
 
   def _on_position(self, ms):
-    self._timeline.canvas.set_playhead(ms / 1000.0)  # set_playhead repaints
+    from .timeline_util import fmt_time_mssff
+    duration = self._player.duration() / 1000.0 if self._player else 0.0
+    self._playback_time.setText(f"{fmt_time_mssff(ms / 1000.0)} / {fmt_time_mssff(duration)}")
+    self._timeline.canvas.set_playhead(ms / 1000.0)
 
   def _on_seek(self, t):
     if self._player and self._playback_ok:

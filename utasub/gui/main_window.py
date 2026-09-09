@@ -78,7 +78,7 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
     self._playback_ok = False
 
     self.setWindowTitle("utasub")
-    self.resize(1200, 700)
+    self.resize(1200, 760)
 
     self._log_dock = LogDock("Log", self)
     self.addDockWidget(Qt.BottomDockWidgetArea, self._log_dock)
@@ -118,6 +118,8 @@ class MainWindow(RegionListMixin, PlaybackMixin, QMainWindow):
 
     build_actions(self)
     self._build_playback_toolbar()
+    self.resizeDocks([self._region_dock], [350], Qt.Horizontal)
+    self.resizeDocks([self._log_dock], [100], Qt.Vertical)
     self._timeline.canvas.dirty_changed.connect(self._refresh_save_action)
     self._refresh_save_action()
     self.probe_llm()

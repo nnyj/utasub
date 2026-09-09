@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush
 from PySide6.QtWidgets import (
   QDockWidget, QTreeWidget, QTreeWidgetItem, QHeaderView, QMenu, QMessageBox,
+  QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QLabel,
 )
 
 from ..core.align import SIMILARITY_THRESHOLD
@@ -55,10 +56,9 @@ class RegionListMixin:
     self._region_list.headerItem().setToolTip(2, STATUS_HINT)
     self._region_list.headerItem().setToolTip(4, STRATEGY_HINT)
     self._region_list.setRootIsDecorated(False)
-    # long titles wrap, so rows vary in height
-    self._region_list.setUniformRowHeights(False)
-    self._region_list.setWordWrap(True)
-    self._region_list.setTextElideMode(Qt.ElideNone)
+    self._region_list.setUniformRowHeights(True)
+    self._region_list.setWordWrap(False)
+    self._region_list.setTextElideMode(Qt.ElideRight)
     header = _NoAutofitHeader(Qt.Horizontal, self._region_list)
     header.setSectionResizeMode(QHeaderView.Interactive)
     header.setStretchLastSection(True)
@@ -188,7 +188,6 @@ class RegionListMixin:
     if row < 0 or not self._regions or row >= len(self._regions):
       self._active_region = None
       self._picker.set_region_label(None)
-      self.set_region_bounds(None)
       self._refresh_region_actions()
       return
     self._store_current_choice()
@@ -211,7 +210,6 @@ class RegionListMixin:
     self._store_current_choice()
 
     self._timeline.canvas.zoom_to_span(region.start, region.end)
-    self.set_region_bounds(region)
     self._refresh_region_actions()
 
   def _refresh_picker_context(self, region):
@@ -254,6 +252,8 @@ class RegionListMixin:
     add_act = menu.addAction("Add region at playhead")
     split_act = menu.addAction("Split region at playhead")
     del_act = menu.addAction("Delete region")
+    bounds_act = menu.addAction("Edit bounds...")
+    bounds_act.setEnabled(row >= 0)
     split_act.setEnabled(row >= 0)
     del_act.setEnabled(row >= 0)
     chosen = menu.exec(self._region_list.viewport().mapToGlobal(pos))
@@ -263,6 +263,8 @@ class RegionListMixin:
       self._split_region(row, playhead)
     elif chosen is del_act:
       self._delete_region(row)
+    elif chosen is bounds_act:
+      self._edit_region_bounds(row)
 
   def region_op(self, op):
     """Menu entries: add/split/delete on the active region. The dock's own
@@ -298,6 +300,7 @@ class RegionListMixin:
       self._select_region_row(self._active_region)
     self._timeline.canvas.update()
     self._refresh_region_actions()
+    self._timeline.canvas._set_dirty(True)
 
   def _shift_region_maps(self, at, delta):
     """Renumber per-region dicts/metas after an insert (delta=+1) or delete."""
@@ -377,32 +380,45 @@ class RegionListMixin:
 
   # --- bounds ---
 
-  def _on_apply_bounds(self):
-    if self._active_region is None or self._active_region >= len(self._regions):
+  def _edit_region_bounds(self, idx):
+    if idx is None or not 0 <= idx < len(self._regions):
       return
     from .timeline_util import parse_time, MIN_REGION_S
-    region = self._regions[self._active_region]
-    new_start = parse_time(self._region_start_edit.text())
-    new_end = parse_time(self._region_end_edit.text())
-    if new_start is None or new_end is None:
-      return
-    if new_end - new_start < MIN_REGION_S:
-      return
-    dur = self._timeline.canvas.duration
-    if dur > 0:
-      new_start = min(new_start, dur - MIN_REGION_S)
-      new_end = min(new_end, dur)
-    new_start = max(0.0, new_start)
-    idx = self._active_region
-    if idx > 0:
-      new_start = max(new_start, self._regions[idx - 1].end)
-    if idx + 1 < len(self._regions):
-      new_end = min(new_end, self._regions[idx + 1].start)
-    if new_end - new_start < MIN_REGION_S:
-      return
-    region.start = round(new_start, 3)
-    region.end = round(new_end, 3)
-    self._on_region_bounds_updated(idx)
+    region = self._regions[idx]
+    dialog = QDialog(self)
+    dialog.setWindowTitle(f"Region {idx + 1}: Edit bounds")
+    form = QFormLayout(dialog)
+    start_edit = QLineEdit(f"{int(region.start // 60)}:{region.start % 60:06.3f}")
+    end_edit = QLineEdit(f"{int(region.end // 60)}:{region.end % 60:06.3f}")
+    start_text, end_text = start_edit.text(), end_edit.text()
+    form.addRow("Start", start_edit)
+    form.addRow("End", end_edit)
+    error = QLabel()
+    error.setWordWrap(True)
+    form.addRow(error)
+    buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    form.addRow(buttons)
+
+    def apply_bounds():
+      start, end = parse_time(start_edit.text()), parse_time(end_edit.text())
+      if start_edit.text() == start_text:
+        start = region.start
+      if end_edit.text() == end_text:
+        end = region.end
+      lower = self._regions[idx - 1].end if idx else 0.0
+      upper = (self._regions[idx + 1].start if idx + 1 < len(self._regions)
+               else self._timeline.canvas.duration or float("inf"))
+      if start is None or end is None or not lower <= start < end <= upper or end - start < MIN_REGION_S:
+        error.setText("Enter valid times within the media and neighboring regions.")
+        return
+      if (start, end) != (region.start, region.end):
+        region.start, region.end = round(start, 3), round(end, 3)
+        self._on_region_bounds_updated(idx)
+      dialog.accept()
+
+    buttons.accepted.connect(apply_bounds)
+    buttons.rejected.connect(dialog.reject)
+    dialog.exec()
 
   def _on_region_boundary_dragged(self, ridx):
     if ridx < 0 or ridx >= len(self._regions):
@@ -412,8 +428,9 @@ class RegionListMixin:
   def _on_region_bounds_updated(self, idx):
     region = self._regions[idx]
     if idx == self._active_region:
-      self.set_region_bounds(region)
       self._refresh_picker_context(region)
     self._populate_region_list()
     self._timeline.canvas.regions = list(self._regions)
     self._timeline.canvas.update()
+    self._refresh_timeline_session_meta()
+    self._timeline.canvas._set_dirty(True)

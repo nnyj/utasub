@@ -2,8 +2,8 @@
 import math
 from dataclasses import replace
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QWheelEvent, QMouseEvent
+from PySide6.QtCore import Qt, Signal, QPointF
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QWheelEvent, QMouseEvent, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 from ..core.align import Cue
@@ -51,9 +51,6 @@ class WaveformCanvas(QWidget):
     self.setMinimumHeight(140)  # MIN_WAVEFORM_H + lane + ruler + margin
     self.setMouseTracking(True)
     self.setFocusPolicy(Qt.StrongFocus)
-    self.setToolTip(
-      "Drag = move · edges = resize · Shift+drag = ripple · Alt = no snap\n"
-      "Shift+wheel = pan · region edges drag in the ruler band")
 
     # data
     self._audio = None      # raw mono float32; None → empty waveform area
@@ -285,6 +282,13 @@ class WaveformCanvas(QWidget):
     waveform clicks seek."""
     if y is not None and y < self._ruler_y():
       return -1, None
+    for i, r in enumerate(self.regions):
+      sx = int(self.time_to_x(r.start))
+      ex = int(self.time_to_x(r.end))
+      if sx < x <= sx + 9:
+        return i, 'start'
+      if ex - 9 <= x < ex:
+        return i, 'end'
     for i, r in enumerate(self.regions):
       sx = int(self.time_to_x(r.start))
       ex = int(self.time_to_x(r.end))
@@ -833,14 +837,35 @@ class WaveformCanvas(QWidget):
 
   # --- paint ---
 
+  def resizeEvent(self, event):
+    super().resizeEvent(event)
+    old_width = event.oldSize().width()
+    if old_width > 0 and self.isVisible() and self.duration > 0:
+      if self.view_start == 0 and self.view_end >= self.duration:
+        self.fit_all()
+        return
+      span = self.view_end - self.view_start
+      self.view_end = self.view_start + span * event.size().width() / old_width
+      self._clamp_view()
+      self.view_changed.emit()
+
   def _draw_region_lines(self, p, y0, y1, pen):
     """Vertical marks at every region boundary between y0 and y1."""
     p.setPen(pen)
     for r in self.regions:
-      for t in (r.start, r.end):
+      for t, direction in ((r.start, 1), (r.end, -1)):
         rx = int(self.time_to_x(t))
         if 0 <= rx < self.width():
           p.drawLine(rx, y0, rx, y1)
+          if y0 >= self._ruler_y():
+            p.save()
+            p.setPen(Qt.NoPen)
+            p.setBrush(theme.REGION_HANDLE)
+            p.drawPolygon(QPolygonF([
+              QPointF(rx, y0), QPointF(rx + 9 * direction, y0),
+              QPointF(rx + 9 * direction, y0 + 7), QPointF(rx, y0 + 12),
+            ]))
+            p.restore()
 
   def _static_layer(self):
     """Waveform, onsets, ruler and region marks rendered once per (view, size).

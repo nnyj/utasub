@@ -10,23 +10,25 @@ GRAY = QColor(170, 170, 175)       # readable secondary text
 DIM = QColor(130, 130, 140)        # hints, disabled-ish, struck credits
 
 # --- surfaces ---
-BG = QColor(30, 30, 35)            # canvas background
-LANE = QColor(25, 25, 30)          # cue lane background
-SURFACE = QColor(45, 45, 50)       # window / toolbar
-SURFACE_HI = QColor(58, 58, 68)    # hover fill
-BASE = QColor(37, 37, 42)          # text/entry background
-BORDER = QColor(60, 60, 70)        # 1px separators, control outlines
-ACCENT = QColor(70, 130, 220)      # selection / focus
+BG = QColor("#1d1f23")             # canvas background
+LANE = QColor("#1d1f23")           # cue lane background
+SURFACE = QColor("#292b30")        # window / toolbar
+SURFACE_HI = QColor("#383c44")      # hover fill
+BASE = QColor("#222429")           # text/entry background
+BORDER = QColor("#3b3e45")         # separators, control outlines
+ACCENT = QColor("#729ce5")         # focus / active tab
+SELECTION = QColor("#354762")
 TEXT = QColor(220, 220, 220)
 CENTER_LINE = BORDER               # waveform center line
-WAVE_PEAK = QColor(70, 160, 70)    # min/max peaks (dark green)
-WAVE_RMS = QColor(120, 220, 120)   # inner RMS band (bright green)
+WAVE_PEAK = QColor("#3c875c")      # min/max peaks
+WAVE_RMS = QColor("#81ca92")       # inner RMS band
 ONSET = QColor(255, 200, 50, 60)   # onset marker (yellow)
 REGION_MARKER = QColor(255, 100, 100, 120)  # region boundary (red dashed)
+REGION_HANDLE = QColor("#df9393")
 PLAYHEAD = QColor(255, 80, 80, 200)         # playhead line (red)
 RULER = GRAY                       # time ruler major ticks/labels
 RULER_MINOR = QColor(95, 95, 105)  # unlabeled minor ticks
-RULER_BAND = QColor(38, 38, 45)    # ruler strip background (region-drag zone)
+RULER_BAND = BASE                  # ruler strip background (region-drag zone)
 CUE_TEXT = TEXT                    # cue block label
 CUE_ROMAJI = DIM                   # cue block romaji second line
 EMPTY_HINT = DIM                   # canvas empty-state hint
@@ -64,7 +66,7 @@ CREDIT_STRIKE = DIM                # struck-through credit lines
 PLAYING_ROW = QColor(255, 210, 130, 40)  # grid row under playhead
 
 # --- log / hints (stylesheet fragments) ---
-LOG_BG = "#1e1e1e"
+LOG_BG = BG.name()
 LOG_FG = "#ccc"
 HINT_GRAY = DIM.name()
 
@@ -87,7 +89,7 @@ ICON_ASR = "#c08adc"          # transcribe (generate ASR)
 
 # --- app-wide theming ---
 
-FONT_PT = 10.5     # base UI size in points, Qt scales points by DPI itself
+FONT_PT = 10.5     # Qt scales points with display DPI
 GROOVE = QColor(35, 35, 42)        # scrollbar groove
 HANDLE = QColor(106, 106, 122)     # scrollbar handle
 DISABLED = QColor(118, 118, 126)
@@ -108,6 +110,7 @@ def apply_theme(app):
   app.setStyle("Fusion")
 
   f = app.font()
+  f.setFamily("Segoe UI")
   f.setPointSizeF(font_pt())
   app.setFont(f)
 
@@ -121,7 +124,7 @@ def apply_theme(app):
   pal.setColor(QPalette.ButtonText, TEXT)
   pal.setColor(QPalette.ToolTipBase, BASE)
   pal.setColor(QPalette.ToolTipText, TEXT)
-  pal.setColor(QPalette.Highlight, ACCENT)
+  pal.setColor(QPalette.Highlight, SELECTION)
   pal.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
   pal.setColor(QPalette.Link, ACCENT)
   pal.setColor(QPalette.Disabled, QPalette.Text, DISABLED)
@@ -131,25 +134,35 @@ def apply_theme(app):
   css = {k: v.name() for k, v in (("hi", SURFACE_HI), ("bd", BORDER),
                                   ("gr", GROOVE), ("hd", HANDLE),
                                   ("ac", ACCENT), ("bg", BASE), ("fg", TEXT),
-                                  ("dis", DISABLED))}
+                                  ("dis", DISABLED), ("sel", SELECTION),
+                                  ("sf", SURFACE), ("gray", GRAY))}
   app.setStyleSheet(
-    "QToolBar {{ border: 0; padding: 4px; spacing: 4px; }}"
-    "QToolButton {{ padding: 4px; border-radius: 4px; }}"
+    "QToolBar {{ border: 0; border-bottom: 1px solid {bd}; padding: 2px; spacing: 1px; }}"
+    "QToolBar::separator {{ background: {bd}; width: 1px; margin: 5px 3px; }}"
+    "QToolButton {{ padding: 3px; border-radius: 2px; }}"
+    "QPushButton {{ background: {hi}; border: 1px solid {bd}; border-radius: 2px; padding: 2px 5px; }}"
+    "QPushButton:hover {{ background: {sel}; }}"
+    "QPushButton:disabled {{ color: {dis}; }}"
     "QToolButton:hover {{ background: {hi}; }}"
     "QToolButton:focus, QPushButton:focus {{ border: 1px solid {ac}; }}"
-    "QMenuBar {{ padding: 2px; }}"
+    "QMenuBar {{ padding: 1px; }}"
     "QMenuBar::item:selected {{ background: {hi}; }}"
     "QToolTip {{ border: 1px solid {bd}; padding: 4px; }}"
-    "QHeaderView::section {{ background: {bg}; border: 0;"
-    " border-bottom: 1px solid {bd}; padding: 4px; }}"
+    "QDockWidget::title {{ padding: 4px 6px; background: {sf}; color: {gray}; }}"
+    "QTabWidget::pane {{ border: 1px solid {bd}; }}"
+    "QTabBar::tab {{ padding: 4px 10px; background: {sf}; color: {gray};"
+    " border-bottom: 2px solid {sf}; }}"
+    "QTabBar::tab:selected {{ color: {ac}; background: {bg}; border-bottom-color: {ac}; }}"
+    "QHeaderView::section {{ background: {sf}; color: {gray}; border: 0;"
+    " border-bottom: 1px solid {bd}; padding: 3px; }}"
     "QTableWidget, QTreeWidget {{ gridline-color: {bd};"
-    " selection-background-color: {ac}; }}"
+    " border: 0; selection-background-color: {sel}; }}"
     "QTableWidget::item, QTreeWidget::item {{ padding: 2px 4px; }}"
     # hover reads as a 1px outline, so only the selection is filled
     "QTableWidget::item:hover, QTreeWidget::item:hover {{"
     " border: 1px solid {hd}; }}"
     "QLineEdit, QComboBox, QDoubleSpinBox {{ border: 1px solid {bd};"
-    " border-radius: 4px; padding: 2px 4px; }}"
+    " border-radius: 2px; padding: 2px 3px; }}"
     "QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus {{"
     " border: 1px solid {ac}; }}"
     # Fusion draws spinbox arrows too faint on dark; CSS border triangles instead.
